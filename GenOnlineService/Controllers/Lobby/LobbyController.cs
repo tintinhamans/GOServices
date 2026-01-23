@@ -1,0 +1,743 @@
+/*
+**    GeneralsOnline Game Services - Backend Services for Command & Conquer Generals Online: Zero Hour
+**    Copyright (C) 2025  GeneralsOnline Development Team
+**
+**    This program is free software: you can redistribute it and/or modify
+**    it under the terms of the GNU Affero General Public License as
+**    published by the Free Software Foundation, either version 3 of the
+**    License, or (at your option) any later version.
+**
+**    This program is distributed in the hope that it will be useful,
+**    but WITHOUT ANY WARRANTY; without even the implied warranty of
+**    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+**    GNU Affero General Public License for more details.
+**
+**    You should have received a copy of the GNU Affero General Public License
+**    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
+using Microsoft.Extensions.Options;
+using System;
+using System.Net;
+using System.Net.WebSockets;
+using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
+using static Database.Functions;
+public class LatencyEntry
+{
+	public Int64 user_id { get; set; }
+	public int latency { get; set; }
+}
+
+public class MissingConnectionEntry
+{
+	public Int64 source_user_id { get; set; }
+	public Int64 target_user_id { get; set; }
+}
+
+
+namespace GenOnlineService.Controllers
+{
+
+	public class RouteHandler_GET_Lobby_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public Lobby? lobby { get; set; } = null;
+	}
+
+	public class RouteHandler_DELETE_Lobby_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public bool success { get; set; } = false;
+	}
+
+	public class RouteHandler_Get_MatchHistory_HighestMatchID_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public Int64 highest_match_id { get; set; } = -1;
+	}
+
+	public class RouteHandler_Get_MatchHistory_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public MatchHistoryCollection matches { get; set; } = new();
+	}
+
+	public class RouteHandler_POST_Lobby_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public bool success { get; set; } = false;
+	}
+
+    public enum ELobbyJoinability
+    {
+        Public,
+		FriendsOnly
+	};
+
+    enum ELobbyUpdateField
+	{
+		LOBBY_MAP = 0,
+		MY_SIDE = 1,
+		MY_COLOR = 2,
+		MY_START_POS = 3,
+		MY_TEAM = 4,
+		LOBBY_STARTING_CASH = 5,
+		LOBBY_LIMIT_SUPERWEAPONS = 6,
+		HOST_ACTION_FORCE_START = 7,
+		LOCAL_PLAYER_HAS_MAP = 8,
+		UNUSED = 9,
+		UNUSED_2 = 10,
+		HOST_ACTION_KICK_USER = 11,
+		HOST_ACTION_SET_SLOT_STATE = 12,
+		AI_SIDE = 13,
+		AI_COLOR = 14,
+		AI_TEAM = 15,
+		AI_START_POS = 16,
+		MAX_CAMERA_HEIGHT = 17,
+        JOINABILITY = 18
+    };
+
+	public class RouteHandler_PUT_Lobby_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+
+		public bool success { get; set; } = false;
+		public string turn_username { get; set; } = String.Empty;
+		public string turn_token { get; set; } = String.Empty;
+	}
+
+
+	[ApiController]
+	[Route("env/{environment}/contract/{contract_version}/[controller]")]
+	public class LobbyController : ControllerBase
+	{
+		private readonly ILogger<LobbiesController> _logger;
+
+		public LobbyController(ILogger<LobbiesController> logger)
+		{
+			_logger = logger;
+		}
+
+		[HttpGet("{lobby_id}")]
+		[Authorize(Roles = "Player,Monitor")]
+		public async Task<APIResult> Get(string lobby_id)
+		{
+			RouteHandler_GET_Lobby_Result result = new RouteHandler_GET_Lobby_Result();
+
+			using (var reader = new StreamReader(HttpContext.Request.Body))
+			{
+				string jsonData = await reader.ReadToEndAsync();
+				var options = new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				};
+
+				try
+				{
+					// need a lobby ID
+					if (Int64.TryParse(lobby_id, out Int64 lobbyID))
+					{
+						Lobby? lobby = LobbyManager.GetLobby(lobbyID);
+						result.lobby = lobby;
+					}
+
+				}
+				catch
+				{
+					return result;
+				}
+
+				if (result.lobby == null)
+				{
+					// monitor cant handle a 404
+					if (!this.User.IsInRole("Monitor"))
+					{
+						Response.StatusCode = (int)HttpStatusCode.NotFound;
+					}
+				}
+			}
+
+			return result;
+		}
+
+		[HttpDelete("{lobbyID}")]
+		[Authorize(Roles = "Player")]
+		public async Task<APIResult> Delete(Int64 lobbyID)
+		{
+			RouteHandler_DELETE_Lobby_Result result = new RouteHandler_DELETE_Lobby_Result();
+
+			using (var reader = new StreamReader(HttpContext.Request.Body))
+			{
+				string jsonData = await reader.ReadToEndAsync();
+				var options = new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				};
+
+				try
+				{
+					// TODO: Dont let them join more than 1 lobby
+					// need a lobby ID
+					int leavingPersonSlot = -1;
+					Int64 user_id = TokenHelper.GetUserID(this);
+					if (user_id != -1)
+					{
+						Lobby? lobby = LobbyManager.GetLobby(lobbyID);
+						if (lobby != null)
+						{
+							foreach (var member in lobby.Members)
+							{
+								if (member.SlotState == EPlayerType.SLOT_PLAYER)
+								{
+									if (member.UserID == user_id)
+									{
+										leavingPersonSlot = member.SlotIndex;
+									}
+								}
+							}
+						}
+
+						Console.WriteLine("[Source 1] User {0} Leave Any Lobby", user_id);
+						LobbyManager.LeaveAnyLobby(user_id);
+
+						// cleanup TURN credentials
+						TURNCredentialManager.DeleteCredentialsForUser(user_id);
+
+						// clear our lobby ID
+						UserSession? sourceData = WebSocketManager.GetDataFromUser(user_id);
+
+						if (sourceData != null)
+						{
+							sourceData.UpdateSessionLobbyID(-1);
+							// NOTE: We dont update the match history match ID here, that is done by the match history service
+						}
+
+						result.success = true;
+					}
+
+				}
+				catch
+				{
+					return result;
+				}
+			}
+
+			return result;
+		}
+
+		[HttpPost("Outcome")]
+		[Authorize(Roles = "Player")]
+		public async Task<APIResult?> PostOutcome()
+		{
+			using (var reader = new StreamReader(HttpContext.Request.Body))
+			{
+				string jsonData = await reader.ReadToEndAsync();
+				var options = new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				};
+
+				try
+				{
+					var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonData, options);
+
+					if (data != null
+						&& data.ContainsKey("match_id")
+						&& data.ContainsKey("buildings_built")
+						&& data.ContainsKey("buildings_killed")
+						&& data.ContainsKey("buildings_lost")
+						&& data.ContainsKey("units_built")
+						&& data.ContainsKey("units_killed")
+						&& data.ContainsKey("units_lost")
+						&& data.ContainsKey("total_money")
+						&& data.ContainsKey("won")
+						)
+					{
+						Int64 user_id = TokenHelper.GetUserID(this);
+						UserSession? sourceData = WebSocketManager.GetDataFromUser(user_id);
+						if (sourceData != null)
+						{
+							int buildings_built = data["buildings_built"].GetInt32();
+							int buildings_killed = data["buildings_killed"].GetInt32();
+							int buildings_lost = data["buildings_lost"].GetInt32();
+							int units_built = data["units_built"].GetInt32();
+							int units_killed = data["units_killed"].GetInt32();
+							int units_lost = data["units_lost"].GetInt32();
+							int total_money = data["total_money"].GetInt32();
+							bool won = data["won"].GetBoolean();
+							UInt64 match_id = data["match_id"].GetUInt64();
+
+							// were they really in the match they claim to be in?
+							if (!sourceData.WasPlayerInMatch(match_id, out int slotIndexInLobby, out int army))
+							{
+								Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+								return null;
+							}
+
+							// register with daily stats
+							DailyStatsManager.RegisterOutcome(army, won);
+
+                            // store in DB
+                            await Database.Functions.Lobby.CommitPlayerOutcome(GlobalDatabaseInstance.g_Database, slotIndexInLobby, match_id,
+									buildings_built, buildings_killed, buildings_lost, units_built, units_killed, units_lost, total_money, won);
+						}
+					}
+				}
+				catch
+				{
+					return null;
+				}
+			}
+
+			return null;
+		}
+
+		[HttpPost("{lobbyID}")]
+		[Authorize(Roles = "Player")]
+		public async Task<APIResult> Post(Int64 lobbyID)
+		{
+			RouteHandler_POST_Lobby_Result result = new RouteHandler_POST_Lobby_Result();
+
+			using (var reader = new StreamReader(HttpContext.Request.Body))
+			{
+				string jsonData = await reader.ReadToEndAsync();
+				var options = new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				};
+
+				try
+				{
+					// TODO: Dont let them join more than 1 lobby
+
+					var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonData, options);
+
+					if (data != null
+						&& data.ContainsKey("field")
+						)
+					{
+						// TODO_NGMP: For all things which modify lobbies, we should check if the player is really in the lobby
+						// get requesting user
+						Int64 user_id = TokenHelper.GetUserID(this);
+						if (user_id != -1)
+						{
+							Lobby? lobby = LobbyManager.GetLobby(lobbyID);
+
+							if (lobby != null)
+							{
+								// check the user is in the lobby, otherwise bail
+								LobbyMember? SourceMember = lobby.GetMemberFromUserID(user_id);
+
+								if (SourceMember == null)
+								{
+									Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+									return result;
+								}
+
+								// TODO: Safety
+								ELobbyUpdateField field = (ELobbyUpdateField)data["field"].GetInt32();
+
+								// reset everyones ready states when anything changes (minus dummy actions)
+								if (field != ELobbyUpdateField.HOST_ACTION_FORCE_START
+									&& field != ELobbyUpdateField.LOCAL_PLAYER_HAS_MAP
+									&& field != ELobbyUpdateField.HOST_ACTION_KICK_USER)
+								{
+									lobby.ResetReadyStates();
+								}
+
+								if (field == ELobbyUpdateField.LOBBY_MAP) // TODO_NGMP: We should enforce hos for some of these updates
+								{
+									if (data.ContainsKey("map")
+										&& data.ContainsKey("map_path")
+										&& data.ContainsKey("max_players")
+										)
+									{
+										string? strMap = data["map"].GetString();
+										string? strMapPath = data["map_path"].GetString();
+										bool bOfficialMap = data["map_official"].GetBoolean();
+										int maxPlayers = data["max_players"].GetInt32();
+
+										if (strMap != null && strMapPath != null)
+										{
+											await lobby.UpdateMap(strMap, strMapPath, bOfficialMap, maxPlayers);
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.MY_SIDE)
+								{
+									if (data.ContainsKey("side")
+										&& data.ContainsKey("start_pos")
+										)
+									{
+										int side = data["side"].GetInt32();
+										int start_pos = data["start_pos"].GetInt32();
+										await SourceMember.UpdateSide(side, start_pos);
+									}
+								}
+								else if (field == ELobbyUpdateField.MY_COLOR)
+								{
+									if (data.ContainsKey("color"))
+									{
+										int color = data["color"].GetInt32();
+										await SourceMember.UpdateColor(color);
+									}
+								}
+								else if (field == ELobbyUpdateField.MY_START_POS)
+								{
+									if (data.ContainsKey("startpos"))
+									{
+										int startpos = data["startpos"].GetInt32();
+										SourceMember.UpdateStartPos(startpos);
+									}
+								}
+								else if (field == ELobbyUpdateField.MY_TEAM)
+								{
+									if (data.ContainsKey("team"))
+									{
+										int team = data["team"].GetInt32();
+										SourceMember.UpdateTeam(team);
+									}
+								}
+								else if (field == ELobbyUpdateField.LOBBY_STARTING_CASH)
+								{
+									if (data.ContainsKey("startingcash"))
+									{
+										UInt32 startingCash = data["startingcash"].GetUInt32();
+										await lobby.UpdateStartingCash(startingCash);
+									}
+								}
+								else if (field == ELobbyUpdateField.LOBBY_LIMIT_SUPERWEAPONS)
+								{
+									if (data.ContainsKey("limit_superweapons"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											bool bLimitSuperweapons = data["limit_superweapons"].GetBoolean();
+											await lobby.UpdateLimitSuperweapons(bLimitSuperweapons);
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.HOST_ACTION_FORCE_START)
+								{
+									// dummy action... just force everyone ready
+									if (user_id == lobby.Owner)
+									{
+										lobby.ForceReady();
+									}
+								}
+								else if (field == ELobbyUpdateField.LOCAL_PLAYER_HAS_MAP)
+								{
+									if (data.ContainsKey("has_map"))
+									{
+										bool bHasMap = data["has_map"].GetBoolean();
+
+										SourceMember.UpdateHasMap(bHasMap);
+									}
+								}
+								else if (field == ELobbyUpdateField.HOST_ACTION_KICK_USER)
+								{
+									if (data.ContainsKey("userid"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											// TODO: we should communicate the kick to the user...
+											Int64 KickedUserID = data["userid"].GetInt64();
+
+											LobbyManager.LeaveSpecificLobby(KickedUserID, lobbyID);
+
+											// cleanup TURN credentials
+											TURNCredentialManager.DeleteCredentialsForUser(KickedUserID);
+
+											// clear our lobby ID
+											UserSession? sourceData = WebSocketManager.GetDataFromUser(KickedUserID);
+
+											if (sourceData != null)
+											{
+												sourceData.UpdateSessionLobbyID(-1);
+												// NOTE: We dont update the match history match ID here, that is done by the match history service
+											}
+
+											// we have to manually send to the kicked user... they won't get the dirty lobby update anymore
+											lobby.DirtyRetransmitToSingleMember(KickedUserID);
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.HOST_ACTION_SET_SLOT_STATE)
+								{
+									// must be host
+									if (user_id == lobby.Owner)
+									{
+										UInt16 slot_index = data["slot_index"].GetUInt16();
+										EPlayerType slot_state = (EPlayerType)data["slot_state"].GetUInt16();
+
+										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot_index);
+										if (TargetMember != null)
+										{
+											TargetMember.SetPlayerSlotState(slot_state);
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.AI_SIDE)
+								{
+									if (data.ContainsKey("slot")
+										&& data.ContainsKey("side")
+										&& data.ContainsKey("start_pos")
+										)
+									{
+										if (user_id == lobby.Owner)
+										{
+											int slot = data["slot"].GetInt32();
+											int side = data["side"].GetInt32();
+											int start_pos = data["start_pos"].GetInt32();
+
+											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+											if (TargetMember != null)
+											{
+												if (TargetMember.IsAI())
+												{
+													await TargetMember.UpdateSide(side, start_pos);
+												}
+											}
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.AI_COLOR)
+								{
+									if (data.ContainsKey("slot")
+										&& data.ContainsKey("color"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											int slot = data["slot"].GetInt32();
+											int color = data["color"].GetInt32();
+
+											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+											if (TargetMember != null)
+											{
+												if (TargetMember.IsAI())
+												{
+													await TargetMember.UpdateColor(color);
+												}
+											}
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.AI_TEAM) // TODO: these funcs should check the slot is ACTUALLY AI, host could abuse it to change others teams etc...
+								{
+									if (data.ContainsKey("slot")
+										&& data.ContainsKey("team"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											int slot = data["slot"].GetInt32();
+											int team = data["team"].GetInt32();
+
+											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+											if (TargetMember != null)
+											{
+												if (TargetMember.IsAI())
+												{
+													TargetMember.UpdateTeam(team);
+												}
+											}
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.AI_START_POS) // TODO: these funcs should check the slot is ACTUALLY AI, host could abuse it to change others teams etc...
+								{
+									if (data.ContainsKey("slot")
+										&& data.ContainsKey("start_pos"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											// TODO: All these AI funcs should check the player being operated upon is AI, otherwise host could use fiddler to alter other users
+											int slot = data["slot"].GetInt32();
+											int start_pos = data["start_pos"].GetInt32();
+
+											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+											if (TargetMember != null)
+											{
+												if (TargetMember.IsAI())
+												{
+													TargetMember.UpdateStartPos(start_pos);
+												}
+											}
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.MAX_CAMERA_HEIGHT)
+								{
+									if (data.ContainsKey("max_camera_height"))
+									{
+										if (user_id == lobby.Owner)
+										{
+											UInt16 maxCameraHeight = data["max_camera_height"].GetUInt16();
+											lobby.UpdateMaxCameraHeight(maxCameraHeight);
+										}
+									}
+								}
+								else if (field == ELobbyUpdateField.JOINABILITY)
+								{
+                                    if (user_id == lobby.Owner)
+                                    {
+                                        ELobbyJoinability newLobbyJoinability = (ELobbyJoinability)data["joinability"].GetInt32();
+                                        lobby.UpdateJoinability(newLobbyJoinability);
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+
+				}
+				catch
+				{
+					return result;
+				}
+			}
+
+			return result;
+		}
+
+		[HttpPut("{lobbyID}")]
+		[Authorize(Roles = "Player")]
+		public async Task<APIResult> Put(Int64 lobbyID)
+		{
+			RouteHandler_PUT_Lobby_Result result = new RouteHandler_PUT_Lobby_Result();
+
+			using (var reader = new StreamReader(HttpContext.Request.Body))
+			{
+				string jsonData = await reader.ReadToEndAsync();
+
+				var options = new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				};
+
+				try
+				{
+					// TODO: Dont let them join more than 1 lobby
+
+					var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonData, options);
+
+					if (data != null
+						&& data.ContainsKey("preferred_port")
+						)
+					{
+
+						Lobby? lobby = LobbyManager.GetLobby(lobbyID);
+
+						if (lobby != null)
+						{
+							Int64 user_id = TokenHelper.GetUserID(this);
+							if (user_id != -1)
+							{
+								UInt16 userPreferredPort = data["preferred_port"].GetUInt16();
+								bool bHasMap = data["has_map"].GetBoolean();
+
+								// does the lobby have a password?
+								bool bLobbyPassworded = lobby.IsPassworded;
+								bool bUserProvidedPassword = data.ContainsKey("password");
+
+								// we need a password
+								if (bLobbyPassworded)
+								{
+									if (bUserProvidedPassword)
+									{
+										// do the passwords match?
+										string? strUserProvidedPassword = data["password"].GetString();
+
+										// if it doesnt match, bail, otherwise just proceed as normal
+										if (strUserProvidedPassword != lobby.Password)
+										{
+											Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+											result.success = false;
+											return result;
+										}
+									}
+									else
+									{
+										// no password, no access
+										Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+										result.success = false;
+										return result;
+									}
+								}
+
+								UserSession? playerSession = WebSocketManager.GetDataFromUser(user_id);
+
+								if (playerSession != null)
+								{
+									string strDisplayName = await Database.Functions.Auth.GetDisplayName(GlobalDatabaseInstance.g_Database, user_id);
+									bool bJoinedSuccessfully = await LobbyManager.JoinLobby(lobby, playerSession, strDisplayName, userPreferredPort, bHasMap);
+
+									result.success = bJoinedSuccessfully;
+
+									if (!bJoinedSuccessfully) // this basically means full, didnt find a slot in correct state
+									{
+										Response.StatusCode = (int)HttpStatusCode.NotAcceptable;
+									}
+									else
+									{
+										// TODO: What if this fails? just let them proceed? just means only direct connect people will be able to play
+										// get some turn credentials
+										TURNCredentialContainer? turnCredentials = await TURNCredentialManager.CreateCredentialsForUser(user_id);
+										if (turnCredentials != null)
+										{
+											result.turn_username = turnCredentials.m_strUsername;
+											result.turn_token = turnCredentials.m_strToken;
+										}
+
+										Response.StatusCode = (int)HttpStatusCode.OK;
+									}
+								}
+								else
+								{
+									Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+								}
+							}
+
+						}
+					}
+
+				}
+				catch
+				{
+					return result;
+				}
+			}
+			
+			return result;
+
+		}
+	}
+}

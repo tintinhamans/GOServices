@@ -1,0 +1,23 @@
+Thank you for playing the Generals Online for Zero Hour Alpha.
+There are currently {0} player(s) online.
+
+Need Help? Visit our Discord.
+
+\ffff7f2f========= Community Rules =========
+\ffff0000 Code of Conduct: www.playgenerals.online/codeofconduct
+\ffff0000 Last Updated: January 16th 2026
+
+\ffff7f2f========= Useful Links =========
+Website: www.playgenerals.online
+Discord: discord.playgenerals.online
+GameReplays: www.gamereplays.org
+
+\ffff7f2f========= Update Info =========
+Client Updated: January 21, 2026
+Server Updated: January 15, 2026
+Patch Notes: www.playgenerals.online/patchnotes
+
+\ffff7f2f========= Notes & Thanks =========
+GeneralsOnline is in no way affiliated with EA/Electronic arts or the Command & Conquer franchise/brand.
+
+Special thanks to the everyone who contributed to development & the SuperHackers team who make GeneralsOnline possible

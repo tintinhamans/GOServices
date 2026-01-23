@@ -1,0 +1,38 @@
+name: Windows (x64 + arm64)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+        os: [win]
+        conf: [Debug, Release]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Build
+      run: dotnet build GenOnlineService/GenOnlineService.csproj --configuration ${{ matrix.conf }} --os ${{ matrix.os }} --arch ${{ matrix.arch }}
+      
+    - name: Test
+      run: dotnet test GenOnlineService/GenOnlineService.csproj --no-build --verbosity normal --configuration ${{ matrix.conf }} --os ${{ matrix.os }} --arch ${{ matrix.arch }}
+
+    - name: Publish
+      run: dotnet publish GenOnlineService/GenOnlineService.csproj --configuration ${{ matrix.conf }} --os ${{ matrix.os }} --arch ${{ matrix.arch }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: GenOnlineService_${{ matrix.os }}_${{ matrix.arch }}_${{matrix.conf}}
+        path: /home/runner/work/Services/Services/GenOnlineService/bin/${{matrix.conf}}/net10.0/${{matrix.os}}-${{matrix.arch}}/publish/
