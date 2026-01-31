@@ -138,7 +138,27 @@ namespace GenOnlineService
 							string strUsername = parts[0];
 							string strPassword = parts[1];
 
-							if (strUsername == "TODO_GITHUB" && strPassword == "TODO_GITHUB")
+							IConfigurationSection? monitorSettings = Program.g_Config.GetSection("Monitor");
+
+							if (monitorSettings == null)
+							{
+								throw new Exception("Monitor section missing in config");
+							}
+
+							string? monitorUsername = monitorSettings.GetValue<string>("username");
+							string? monitorPassword = monitorSettings.GetValue<string>("password");
+
+							if (monitorUsername == null)
+							{
+								throw new Exception("Monitor Username missing in config");
+							}
+
+							if (monitorPassword == null)
+							{
+								throw new Exception("Monitor Password missing in config");
+							}
+
+							if (strUsername == monitorUsername && strPassword == monitorPassword)
 							{
 								var claims = new[] { new Claim(ClaimTypes.Name, strUsername), new Claim(ClaimTypes.Role, "Monitor") };
 								var identity = new ClaimsIdentity(claims, "MonitorToken");
