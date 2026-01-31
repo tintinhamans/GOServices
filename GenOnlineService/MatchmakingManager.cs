@@ -943,22 +943,13 @@ static class MatchmakingManager
                 new PlaylistMap("[RANK] AKAs Magic ZH v1", "[RANK] AKAs Magic ZH v1", true, 2),
                 new PlaylistMap("[RANK] Arctic Arena ZH v1", "[RANK] Arctic Arena ZH v1", true, 2),
                 new PlaylistMap("[RANK] Black Hell ZH v1", "[RANK] Black Hell ZH v1", true, 2),
-                new PlaylistMap("[RANK] Blossoming Valley ZH v1", "[RANK] Blossoming Valley ZH v1", true, 2),
                 new PlaylistMap("[RANK] Blue Hole ZH v1", "[RANK] Blue Hole ZH v1", true, 2),
                 new PlaylistMap("[RANK] Dammed Scorpion ZH v1", "[RANK] Dammed Scorpion ZH v1", true, 2),
-                new PlaylistMap("[RANK] Desolated District ZH v1", "[RANK] Desolated District ZH v1", true, 2),
                 new PlaylistMap("[RANK] Drallim Desert ZH v2", "[RANK] Drallim Desert ZH v2", true, 2),
-                new PlaylistMap("[RANK] Egyptian Oasis ZH v1", "[RANK] Egyptian Oasis ZH v1", true, 2),
                 new PlaylistMap("[RANK] Farmlands of the Fallen ZH v1", "[RANK] Farmlands of the Fallen ZH v1", true, 2),
-                new PlaylistMap("[RANK] Imminent Victory ZH v2", "[RANK] Imminent Victory ZH v2", true, 2),
-                new PlaylistMap("[RANK] Liquid Gold ZH v2", "[RANK] Liquid Gold ZH v2", true, 2),
-                new PlaylistMap("[RANK] Mountain Mayhem v2", "[RANK] Mountain Mayhem v2", true, 2),
                 new PlaylistMap("[RANK] Sakura Forest II ZH v1", "[RANK] Sakura Forest II ZH v1", true, 2),
                 new PlaylistMap("[RANK] Snowy Drought ZH v5", "[RANK] Snowy Drought ZH v5", true, 2),
-                new PlaylistMap("[RANK] Sovereignty ZH v1", "[RANK] Sovereignty ZH v1", true, 2),
-                new PlaylistMap("[RANK] TD NoBugsCars ZH v1", "[RANK] TD NoBugsCars ZH v1", true, 2),
-                new PlaylistMap("[RANK] Vendetta ZH v1", "[RANK] Vendetta ZH v1", true, 2),
-                new PlaylistMap("[RANK] ZH Carrier is Over v2", "[RANK] ZH Carrier is Over v2", true, 2),
+                new PlaylistMap("[RANK] Sovereignty ZH v1", "[RANK] Sovereignty ZH v1", true, 2)
             }
 		) },
 
