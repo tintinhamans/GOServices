@@ -123,7 +123,7 @@ public class DiscordBot
 		}
 	}
 
-	public async void SendNetworkRoomChat(int roomID, Int64 userID, string strDisplayName, string strMessage)
+	public async Task SendNetworkRoomChat(int roomID, Int64 userID, string strDisplayName, string strMessage)
 	{
 		try
 		{

@@ -21,6 +21,7 @@ using MaxMind.GeoIP2;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System;
+using System.Buffers;
 using System.Net.WebSockets;
 using System.Security.Claims;
 using System.Text;
@@ -394,7 +395,7 @@ namespace GenOnlineService.Controllers
 
 						outboundMsg.action = chatMessage.action;
 
-						// send to everyone (minus those who have the chatter blocked)
+						// Serialize once before broadcasting
 						byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
 
 						// send it to everyone in the same room
@@ -430,7 +431,7 @@ namespace GenOnlineService.Controllers
 					if (data != null && data.ContainsKey("room"))
 					{
 						Int16 roomID = data["room"].GetInt16();
-						sourceUserSession.UpdateSessionNetworkRoom(roomID);
+						await sourceUserSession.UpdateSessionNetworkRoom(roomID);
 					}
 				}
 				else if (msgID == EWebSocketMessageID.NETWORK_ROOM_MARK_READY)
@@ -557,7 +558,7 @@ namespace GenOnlineService.Controllers
 							outboundMsg.announcement = chatMessage.announcement;
 							outboundMsg.show_announcement_to_host = chatMessage.show_announcement_to_host;
 
-							// send to everyone in lobby
+							// Serialize once before broadcasting
 							byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
 
 							foreach (LobbyMember lobbyMember in playerLobby.Members)
@@ -630,7 +631,7 @@ namespace GenOnlineService.Controllers
 					}
 
 					// start match + create placeholder match
-					lobbyInfo.UpdateState(ELobbyState.INGAME);
+					await lobbyInfo.UpdateState(ELobbyState.INGAME);
 
 					// simple websocket msg, has no data, so dont even read anything
 
@@ -638,7 +639,7 @@ namespace GenOnlineService.Controllers
 					WebSocketMessage_Simple startCommand = new WebSocketMessage_Simple();
 					startCommand.msg_id = (int)EWebSocketMessageID.START_GAME;
 
-					// send to everyone in lobby
+					// Serialize once before broadcasting
 					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(startCommand));
 
 					foreach (KeyValuePair<Int64, UserSession> sessionData in WebSocketManager.GetUserDataCache())
@@ -682,7 +683,7 @@ namespace GenOnlineService.Controllers
 					WebSocketMessage_Simple startCommand = new WebSocketMessage_Simple();
 					startCommand.msg_id = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE;
 
-					// send to everyone in lobby
+					// Serialize once before broadcasting
 					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(startCommand));
 
 					foreach (KeyValuePair<Int64, UserSession> sessionData in WebSocketManager.GetUserDataCache())
@@ -757,12 +758,6 @@ namespace GenOnlineService.Controllers
 				}
 				else if (msgID == EWebSocketMessageID.NETWORK_SIGNAL)
 				{
-					var options = new JsonSerializerOptions
-					{
-						PropertyNameCaseInsensitive = true,
-						AllowOutOfOrderMetadataProperties = true
-					};
-
 					WebSocketMessage_SignalBidirectional? signal =
 						JsonSerializer.Deserialize<WebSocketMessage_SignalBidirectional>(payload, JsonOpts);
 					//Console.WriteLine("Signal received: " + signal.signal);

@@ -60,10 +60,29 @@ namespace GenOnlineService.Controllers
 	public class LobbiesController : ControllerBase
 	{
 		private readonly ILogger<LobbiesController> _logger;
+		private static List<RoomData>? s_cachedRooms = null;
+		private static readonly object s_roomsLock = new object();
 
 		public LobbiesController(ILogger<LobbiesController> logger)
 		{
 			_logger = logger;
+		}
+
+		// Cache rooms.json data to avoid disk I/O on every request
+		private static async Task<List<RoomData>?> GetCachedRooms(JsonSerializerOptions options)
+		{
+			if (s_cachedRooms == null)
+			{
+				lock (s_roomsLock)
+				{
+					if (s_cachedRooms == null)
+					{
+						string strFileData = System.IO.File.ReadAllText(Path.Combine("data", "rooms.json"));
+						s_cachedRooms = JsonSerializer.Deserialize<List<RoomData>>(strFileData, options);
+					}
+				}
+			}
+			return await Task.FromResult(s_cachedRooms);
 		}
 
 		// FOR LATENCY ESTIMATIONS
@@ -136,9 +155,8 @@ namespace GenOnlineService.Controllers
 
 						if (sourceData != null)
 						{
-							// TODO: Dont deserialize this per request, cache it in the session
-							string strFileData = await System.IO.File.ReadAllTextAsync(Path.Combine("data", "rooms.json"));
-							List<RoomData>? lstRooms = JsonSerializer.Deserialize<List<RoomData>>(strFileData, options);
+							// Use cached rooms data
+							List<RoomData>? lstRooms = await GetCachedRooms(options);
 							if (lstRooms != null)
 							{
 								foreach (RoomData room in lstRooms)
@@ -306,6 +324,28 @@ namespace GenOnlineService.Controllers
 						UInt16 maxCamHeight = Convert.ToUInt16(data["max_cam_height"].GetDouble()); // client sends this as a float...
 						UInt32 exe_crc = data["exe_crc"].GetUInt32();
 						UInt32 ini_crc = data["ini_crc"].GetUInt32();
+
+						// Input validation
+						if (strName != null && strName.Length > 255)
+						{
+							Response.StatusCode = (int)HttpStatusCode.BadRequest;
+							return result;
+						}
+						if (strMapName != null && strMapName.Length > 255)
+						{
+							Response.StatusCode = (int)HttpStatusCode.BadRequest;
+							return result;
+						}
+						if (strMapPath != null && strMapPath.Length > 512)
+						{
+							Response.StatusCode = (int)HttpStatusCode.BadRequest;
+							return result;
+						}
+						if (strPassword != null && strPassword.Length > 128)
+						{
+							Response.StatusCode = (int)HttpStatusCode.BadRequest;
+							return result;
+						}
 
 						
 

@@ -238,11 +238,11 @@ namespace GenOnlineService
 			return newSess;
 		}
 
-		public static async void Tick()
+		public static async Task Tick()
 		{
 			foreach (var kvPair in m_dictUserSessions)
 			{
-				kvPair.Value.TickWebsocket();
+				await kvPair.Value.TickWebsocket();
 			}
 		}
 
@@ -642,7 +642,7 @@ namespace GenOnlineService
 			return websocketForUser;
 		}
 
-		public async void TickWebsocket()
+		public async Task TickWebsocket()
 		{
 			// Do we have a connection to send on?
 			UserWebSocketInstance websocketForUser = WebSocketManager.GetWebSocketForSession(this);
@@ -748,7 +748,7 @@ namespace GenOnlineService
 			return bWasInMatch;
 		}
 
-		public async void UpdateSessionNetworkRoom(Int16 newRoomID)
+		public async Task UpdateSessionNetworkRoom(Int16 newRoomID)
 		{
 			Int16 oldRoom = networkRoomID;
 			networkRoomID = newRoomID;

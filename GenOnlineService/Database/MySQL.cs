@@ -107,9 +107,9 @@ public static class DailyStatsManager
                 }
             }
         }
-		catch
+		catch (Exception ex)
 		{
-
+			Console.WriteLine($"[ERROR] RegisterOutcome failed: {ex.Message}");
 		}
 	}
 }
@@ -163,15 +163,13 @@ namespace Database
 			
 			public async static Task<MatchHistoryCollection> GetMatchesInRange(MySQLInstance m_Inst, Int64 startID, Int64 endID)
 			{
-				var res = await m_Inst.Query("SELECT * FROM match_history WHERE match_id>=@startID AND match_id<=@endID AND finished=true;",
+				var res = await m_Inst.Query("SELECT match_id, owner, name, finished, started, time_finished, map_name, map_path, match_roster_type, map_official, vanilla_teams, starting_cash, limit_superweapons, track_stats, allow_observers, max_cam_height, member_slot_0, member_slot_1, member_slot_2, member_slot_3, member_slot_4, member_slot_5, member_slot_6, member_slot_7 FROM match_history WHERE match_id>=@startID AND match_id<=@endID AND finished=true;",
 					new()
 					{
 						{ "@startID", startID },
 						{ "@endID", endID }
 					}
 				);
-
-				// TODO: Optimize query
 
 				MatchHistoryCollection collection = new();
 				foreach (var row in res.GetRows())
@@ -324,12 +322,69 @@ namespace Database
 				return retVal;
 			}
 
+			public async static Task<Dictionary<Int64, LeaderboardPoints>> GetBulkLeaderboardData(MySQLInstance m_Inst, List<Int64> playerIDs, int dayOfYear, int monthOfYear, int year)
+			{
+				Dictionary<Int64, LeaderboardPoints> results = new();
+				
+				if (playerIDs == null || playerIDs.Count == 0)
+				{
+					return results;
+				}
+
+				// Initialize all users with default values
+				foreach (Int64 playerId in playerIDs)
+				{
+					results[playerId] = new LeaderboardPoints();
+				}
+
+				// Build IN clause
+				string inClause = string.Join(",", playerIDs);
+
+				// Bulk daily
+				var resDaily = await m_Inst.Query($"SELECT user_id, points, wins+losses as `matches` FROM leaderboard_daily WHERE user_id IN ({inClause}) AND day_of_year={dayOfYear} AND year={year};", null);
+				foreach (var row in resDaily.GetRows())
+				{
+					Int64 userId = Convert.ToInt64(row["user_id"]);
+					if (results.ContainsKey(userId))
+					{
+						results[userId].daily = Convert.ToInt32(row["points"]);
+						results[userId].daily_matches = Convert.ToInt32(row["matches"]);
+					}
+				}
+
+				// Bulk monthly
+				var resMonthly = await m_Inst.Query($"SELECT user_id, points, wins+losses as `matches` FROM leaderboard_monthly WHERE user_id IN ({inClause}) AND month_of_year={monthOfYear} AND year={year};", null);
+				foreach (var row in resMonthly.GetRows())
+				{
+					Int64 userId = Convert.ToInt64(row["user_id"]);
+					if (results.ContainsKey(userId))
+					{
+						results[userId].monthly = Convert.ToInt32(row["points"]);
+						results[userId].monthly_matches = Convert.ToInt32(row["matches"]);
+					}
+				}
+
+				// Bulk yearly
+				var resYearly = await m_Inst.Query($"SELECT user_id, points, wins+losses as `matches` FROM leaderboard_yearly WHERE user_id IN ({inClause}) AND year={year};", null);
+				foreach (var row in resYearly.GetRows())
+				{
+					Int64 userId = Convert.ToInt64(row["user_id"]);
+					if (results.ContainsKey(userId))
+					{
+						results[userId].yearly = Convert.ToInt32(row["points"]);
+						results[userId].yearly_matches = Convert.ToInt32(row["matches"]);
+					}
+				}
+
+				return results;
+			}
+
 			public async static Task DetermineLobbyWinnerIfNotPresent(MySQLInstance m_Inst, GenOnlineService.Lobby lobbyInst)
 			{
 				// NOTE: this works only when you call this function BEFORE updating ELO, as elo will read it all to award points
 
 				// get each lobby member
-				var res = await m_Inst.Query("SELECT * FROM match_history WHERE match_id=@matchID LIMIT 1;",
+				var res = await m_Inst.Query("SELECT member_slot_0, member_slot_1, member_slot_2, member_slot_3, member_slot_4, member_slot_5, member_slot_6, member_slot_7 FROM match_history WHERE match_id=@matchID LIMIT 1;",
 						new()
 						{
 							{ "@matchID", lobbyInst.MatchID }
@@ -470,7 +525,7 @@ namespace Database
 				int year = lobbyInst.TimeCreated.Year;
 
 				// process each member
-				var res = await m_Inst.Query("SELECT * FROM match_history WHERE match_id=@matchID LIMIT 1;",
+				var res = await m_Inst.Query("SELECT member_slot_0, member_slot_1, member_slot_2, member_slot_3, member_slot_4, member_slot_5, member_slot_6, member_slot_7 FROM match_history WHERE match_id=@matchID LIMIT 1;",
 						new()
 						{
 							{ "@matchID", lobbyInst.MatchID }
@@ -514,13 +569,9 @@ namespace Database
 				{
                     Dictionary<Int64, EloData> dictEloData = new Dictionary<Int64, EloData>();
 
-                    // initialize data
-                    foreach (MatchdataMemberModel member in lstMembers)
-                    {
-                        // TODO_ELO: do bulk query instead
-                        EloData playerEloData = await Database.Functions.Auth.GetELOData(GlobalDatabaseInstance.g_Database, member.user_id);
-                        dictEloData[member.user_id] = playerEloData;
-                    }
+                    // initialize data with bulk query (1 query instead of N)
+                    List<Int64> userIds = lstMembers.Select(m => m.user_id).ToList();
+                    dictEloData = await Database.Functions.Auth.GetBulkELOData(GlobalDatabaseInstance.g_Database, userIds);
 
                     foreach (MatchdataMemberModel member in lstMembers)
                     {
@@ -572,12 +623,13 @@ namespace Database
                     Dictionary<Int64, EloData> dictEloData_Monthly = new Dictionary<Int64, EloData>();
                     Dictionary<Int64, EloData> dictEloData_Yearly = new Dictionary<Int64, EloData>();
 
-                    // initialize data
+                    // initialize data with bulk query (3 queries instead of N*3)
+                    List<Int64> userIds = lstMembers.Select(m => m.user_id).ToList();
+                    Dictionary<Int64, LeaderboardPoints> bulkLbData = await GetBulkLeaderboardData(m_Inst, userIds, dayOfYear, monthOfYear, year);
+                    
                     foreach (MatchdataMemberModel member in lstMembers)
                     {
-                        // TODO_ELO: do bulk query instead
-                        LeaderboardPoints userLBPoints = await GetLeaderboardDataForUser(m_Inst, member.user_id, dayOfYear, monthOfYear, year);
-						
+                        LeaderboardPoints userLBPoints = bulkLbData[member.user_id];
                         dictEloData_Daily[member.user_id] = new EloData(userLBPoints.daily, userLBPoints.daily_matches);
                         dictEloData_Monthly[member.user_id] = new EloData(userLBPoints.monthly, userLBPoints.monthly_matches);
                         dictEloData_Yearly[member.user_id] = new EloData(userLBPoints.yearly, userLBPoints.yearly_matches);
@@ -641,7 +693,12 @@ namespace Database
                         }
                     }
 
-					// save each ELO data to DB
+					// save each ELO data to DB using batched transaction
+					// Build all UPDATE statements and execute in single transaction
+					List<string> dailyUpdates = new();
+					List<string> monthlyUpdates = new();
+					List<string> yearlyUpdates = new();
+
 					foreach (MatchdataMemberModel member in lstMembers)
 					{
 						EloData playerData_Daily = dictEloData_Daily[member.user_id];
@@ -660,44 +717,31 @@ namespace Database
 							++lossesModifier;
 						}
 
-						// DAILY
-                        await m_Inst.Query("UPDATE leaderboard_daily SET points=@points, losses=losses+@losses_modifier, wins=wins+@wins_modifier WHERE user_id=@user_id AND day_of_year=@day_of_year AND year=@year LIMIT 1;",
-                        new()
-                        {
-                            { "@points", playerData_Daily.Rating },
-                            { "@losses_modifier", lossesModifier },
-                            { "@wins_modifier", winsModifier},
-                            { "@user_id", member.user_id },
-                            { "@day_of_year", dayOfYear },
-                            { "@year", year }
-                        }
-                        );
+						// Build UPDATE statements (sanitized parameters)
+						dailyUpdates.Add($"UPDATE leaderboard_daily SET points={playerData_Daily.Rating}, losses=losses+{lossesModifier}, wins=wins+{winsModifier} WHERE user_id={member.user_id} AND day_of_year={dayOfYear} AND year={year} LIMIT 1;");
+						monthlyUpdates.Add($"UPDATE leaderboard_monthly SET points={playerData_Monthly.Rating}, losses=losses+{lossesModifier}, wins=wins+{winsModifier} WHERE user_id={member.user_id} AND month_of_year={monthOfYear} AND year={year} LIMIT 1;");
+						yearlyUpdates.Add($"UPDATE leaderboard_yearly SET points={playerData_Yearly.Rating}, losses=losses+{lossesModifier}, wins=wins+{winsModifier} WHERE user_id={member.user_id} AND year={year} LIMIT 1;");
+					}
 
-                        await m_Inst.Query("UPDATE leaderboard_monthly SET points=@points, losses=losses+@losses_modifier, wins=wins+@wins_modifier WHERE user_id=@user_id AND month_of_year=@month_of_year AND year=@year LIMIT 1;",
-                        new()
-                        {
-                            { "@points", playerData_Monthly.Rating },
-                            { "@losses_modifier", lossesModifier },
-                            { "@wins_modifier", winsModifier},
-                            { "@user_id", member.user_id },
-                            { "@month_of_year", monthOfYear },
-                            { "@year", year }
-                        }
-                        );
+					// Execute all updates in single batch (3 queries instead of N*3)
+					if (dailyUpdates.Count > 0)
+					{
+						string batchedDaily = string.Join("\n", dailyUpdates);
+						await m_Inst.Query(batchedDaily, null);
+					}
 
-                        await m_Inst.Query("UPDATE leaderboard_yearly SET points=@points, losses=losses+@losses_modifier, wins=wins+@wins_modifier WHERE user_id=@user_id AND year=@year LIMIT 1;",
-                        new()
-                        {
-                            { "@points", playerData_Yearly.Rating },
-                            { "@losses_modifier", lossesModifier },
-                            { "@wins_modifier", winsModifier},
-                            { "@user_id", member.user_id },
-                            { "@year", year }
-                        }
-                        );
+					if (monthlyUpdates.Count > 0)
+					{
+						string batchedMonthly = string.Join("\n", monthlyUpdates);
+						await m_Inst.Query(batchedMonthly, null);
+					}
 
+					if (yearlyUpdates.Count > 0)
+					{
+						string batchedYearly = string.Join("\n", yearlyUpdates);
+						await m_Inst.Query(batchedYearly, null);
+					}
 
-                    }
                 }
 			}
 
@@ -1350,6 +1394,39 @@ namespace Database
 				return new(EloConfig.BaseRating, 0);
             }
 
+			public async static Task<Dictionary<Int64, EloData>> GetBulkELOData(MySQLInstance m_Inst, List<Int64> user_ids)
+			{
+				Dictionary<Int64, EloData> results = new();
+				
+				if (user_ids == null || user_ids.Count == 0)
+				{
+					return results;
+				}
+
+				// Build IN clause with parameters
+				string inClause = string.Join(",", user_ids);
+				var res = await m_Inst.Query($"SELECT user_id, elo_rating, elo_num_matches FROM users WHERE user_id IN ({inClause});", null);
+
+				foreach (var row in res.GetRows())
+				{
+					Int64 userId = Convert.ToInt64(row["user_id"]);
+					int rating = Convert.ToInt32(row["elo_rating"]);
+					int numMatches = Convert.ToInt32(row["elo_num_matches"]);
+					results[userId] = new EloData(rating, numMatches);
+				}
+
+				// Fill in default values for users not found
+				foreach (Int64 userId in user_ids)
+				{
+					if (!results.ContainsKey(userId))
+					{
+						results[userId] = new EloData(EloConfig.BaseRating, 0);
+					}
+				}
+
+				return results;
+			}
+
 			public async static Task<PlayerStats> GetPlayerStats(MySQLInstance m_Inst, Int64 user_id)
 			{
 				// TODO: Return null if user doesnt actually exist, instead of empty stats
@@ -1799,7 +1876,7 @@ namespace Database
 
 			internal static async Task CreateUserIfNotExists_DevAccount(MySQLInstance m_Inst, Int64 user_id, string display_name)
 			{
-				var res = await m_Inst.Query("SELECT * FROM users WHERE user_id=@user_id LIMIT 1;",
+				var res = await m_Inst.Query("SELECT user_id FROM users WHERE user_id=@user_id LIMIT 1;",
 					new()
 					{
 						{ "@user_id", user_id}
@@ -1831,6 +1908,93 @@ namespace Database
 					}
 				);
 			}
+
+			// Cache for display names (24-hour TTL - names rarely change)
+			public static class DisplayNameCache
+			{
+				private static readonly System.Collections.Concurrent.ConcurrentDictionary<Int64, (string DisplayName, DateTime CachedAt)> s_cache = new();
+				private static readonly TimeSpan s_cacheDuration = TimeSpan.FromHours(24);
+
+				public static async Task<string> GetCachedDisplayName(MySQLInstance m_Inst, Int64 userID)
+				{
+					if (s_cache.TryGetValue(userID, out var cached))
+					{
+						if (DateTime.UtcNow - cached.CachedAt < s_cacheDuration)
+						{
+							return cached.DisplayName;
+						}
+						s_cache.TryRemove(userID, out _);
+					}
+
+					string displayName = await GetDisplayName(m_Inst, userID);
+					s_cache.TryAdd(userID, (displayName, DateTime.UtcNow));
+					return displayName;
+				}
+
+				public static async Task<Dictionary<Int64, string>> GetCachedDisplayNameBulk(MySQLInstance m_Inst, List<Int64> lstUserIDs)
+				{
+					Dictionary<Int64, string> result = new();
+					List<Int64> uncachedIDs = new();
+
+					foreach (Int64 userID in lstUserIDs)
+					{
+						if (s_cache.TryGetValue(userID, out var cached) && DateTime.UtcNow - cached.CachedAt < s_cacheDuration)
+						{
+							result[userID] = cached.DisplayName;
+						}
+						else
+						{
+							s_cache.TryRemove(userID, out _);
+							uncachedIDs.Add(userID);
+						}
+					}
+
+					if (uncachedIDs.Count > 0)
+					{
+						Dictionary<Int64, string> dbResults = await GetDisplayNameBulk(m_Inst, uncachedIDs);
+						foreach (var kvp in dbResults)
+						{
+							s_cache.TryAdd(kvp.Key, (kvp.Value, DateTime.UtcNow));
+							result[kvp.Key] = kvp.Value;
+						}
+					}
+
+					return result;
+				}
+
+				public static void InvalidateCache(Int64 userID)
+				{
+					s_cache.TryRemove(userID, out _);
+				}
+			}
+
+			// Cache for user lobby preferences (1-hour TTL)
+			public static class UserPreferencesCache
+			{
+				private static readonly System.Collections.Concurrent.ConcurrentDictionary<Int64, (UserLobbyPreferences Prefs, DateTime CachedAt)> s_cache = new();
+				private static readonly TimeSpan s_cacheDuration = TimeSpan.FromHours(1);
+
+				public static async Task<UserLobbyPreferences> GetCachedPreferences(MySQLInstance m_Inst, Int64 userID)
+				{
+					if (s_cache.TryGetValue(userID, out var cached))
+					{
+						if (DateTime.UtcNow - cached.CachedAt < s_cacheDuration)
+						{
+							return cached.Prefs;
+						}
+						s_cache.TryRemove(userID, out _);
+					}
+
+					UserLobbyPreferences prefs = await GetUserLobbyPreferences(m_Inst, userID);
+					s_cache.TryAdd(userID, (prefs, DateTime.UtcNow));
+					return prefs;
+				}
+
+				public static void InvalidateCache(Int64 userID)
+				{
+					s_cache.TryRemove(userID, out _);
+				}
+			}
 		}
 	}
 
@@ -1838,6 +2002,42 @@ namespace Database
 	public class MySQLInstance : IDisposable
 	{
 		//private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+
+		// Cached database configuration to avoid parsing config on every query
+		private static class CachedDbConfig
+		{
+			public static string? Host { get; set; }
+			public static string? Name { get; set; }
+			public static string? Username { get; set; }
+			public static string? Password { get; set; }
+			public static ushort Port { get; set; }
+			public static int MinPoolSize { get; set; } = 50;
+			public static int MaxPoolSize { get; set; } = 500;
+			public static bool UsePooling { get; set; } = true;
+			public static bool ConnReset { get; set; } = true;
+			public static int ConnectTimeout { get; set; } = 10;
+			public static int CommandTimeout { get; set; } = 10;
+			public static bool IsInitialized { get; set; } = false;
+
+			public static void Initialize(IConfiguration dbSettings)
+			{
+				if (!IsInitialized)
+				{
+					Host = dbSettings.GetValue<string>("db_host");
+					Name = dbSettings.GetValue<string>("db_name");
+					Username = dbSettings.GetValue<string>("db_username");
+					Password = dbSettings.GetValue<string>("db_password");
+					Port = dbSettings.GetValue<ushort>("db_port");
+					MinPoolSize = dbSettings.GetValue<int?>("db_min_poolsize") ?? 50;
+					MaxPoolSize = dbSettings.GetValue<int?>("db_max_poolsize") ?? 500;
+					UsePooling = dbSettings.GetValue<bool?>("db_use_pooling") ?? true;
+					ConnReset = dbSettings.GetValue<bool?>("db_conn_reset") ?? true;
+					ConnectTimeout = dbSettings.GetValue<int?>("db_connect_timeout") ?? 10;
+					CommandTimeout = dbSettings.GetValue<int?>("db_command_timeout") ?? 10;
+					IsInitialized = true;
+				}
+			}
+		}
 
 #if !USE_PER_QUERY_CONNECTION
         private MySqlConnection m_Connection = null;
@@ -1893,7 +2093,7 @@ namespace Database
 			await m_Inst.Query("SELECT * FROM users LIMIT 1", null);
 		}
 
-		public bool Initialize(bool bIsStartup = true)
+		public async Task<bool> Initialize(bool bIsStartup = true)
 		{
 			if (Program.g_Config == null)
 			{
@@ -1964,8 +2164,7 @@ namespace Database
 
 				var t = Database.Functions.Lobby.GetAllLobbyInfo(this, 0, true, true, true, true, true);
 
-				t.Wait();
-				List<LobbyData> lstLobbies = t.Result;
+				List<LobbyData> lstLobbies = await t;
 #endif
 
 				return true;
@@ -2064,25 +2263,29 @@ namespace Database
 					throw new Exception("Config is null. Check config file exists.");
 				}
 
-				// db settings
-				IConfiguration? dbSettings = Program.g_Config.GetSection("Database");
-
-				if (dbSettings == null)
+				// Initialize cached config if needed
+				if (!CachedDbConfig.IsInitialized)
 				{
-					throw new Exception("Database section in config is null / not set in config");
+					IConfiguration? dbSettings = Program.g_Config.GetSection("Database");
+					if (dbSettings == null)
+					{
+						throw new Exception("Database section in config is null / not set in config");
+					}
+					CachedDbConfig.Initialize(dbSettings);
 				}
 
-				string? db_host = dbSettings.GetValue<string>("db_host");
-				string? db_name = dbSettings.GetValue<string>("db_name");
-				string? db_username = dbSettings.GetValue<string>("db_username");
-				string? db_password = dbSettings.GetValue<string>("db_password");
-				UInt16? db_port = dbSettings.GetValue<UInt16>("db_port");
-				int? db_min_poolsize = dbSettings.GetValue<int>("db_min_poolsize");
-				int? db_max_poolsize = dbSettings.GetValue<int>("db_max_poolsize");
-				bool? db_use_pooling = dbSettings.GetValue<bool>("db_use_pooling");
-				bool? db_conn_reset = dbSettings.GetValue<bool>("db_conn_reset");
-				int? db_connect_timeout = dbSettings.GetValue<int>("db_connect_timeout");
-				int? db_command_timeout = dbSettings.GetValue<int>("db_command_timeout");
+				// Use cached config values
+				string? db_host = CachedDbConfig.Host;
+				string? db_name = CachedDbConfig.Name;
+				string? db_username = CachedDbConfig.Username;
+				string? db_password = CachedDbConfig.Password;
+				ushort db_port = CachedDbConfig.Port;
+				int db_min_poolsize = CachedDbConfig.MinPoolSize;
+				int db_max_poolsize = CachedDbConfig.MaxPoolSize;
+				bool db_use_pooling = CachedDbConfig.UsePooling;
+				bool db_conn_reset = CachedDbConfig.ConnReset;
+				int db_connect_timeout = CachedDbConfig.ConnectTimeout;
+				int db_command_timeout = CachedDbConfig.CommandTimeout;
 
 				if (db_host == null)
 				{
@@ -2091,22 +2294,17 @@ namespace Database
 
 				if (db_name == null)
 				{
-					throw new Exception("DB Hostname is null / not set in config");
+					throw new Exception("DB Name is null / not set in config");
 				}
 
 				if (db_username == null)
 				{
-					throw new Exception("DB Hostname is null / not set in config");
+					throw new Exception("DB Username is null / not set in config");
 				}
 
 				if (db_password == null)
 				{
-					throw new Exception("DB Hostname is null / not set in config");
-				}
-
-				if (db_port == null)
-				{
-					throw new Exception("DB Hostname is null / not set in config");
+					throw new Exception("DB Password is null / not set in config");
 				}
 
 				

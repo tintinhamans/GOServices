@@ -263,7 +263,8 @@ namespace GenOnlineService.Controllers
 				string jsonData = await reader.ReadToEndAsync();
 				var options = new JsonSerializerOptions
 				{
-					PropertyNameCaseInsensitive = true
+					PropertyNameCaseInsensitive = true,
+					MaxDepth = 32
 				};
 
 				try
@@ -487,7 +488,7 @@ namespace GenOnlineService.Controllers
 											}
 
 											// we have to manually send to the kicked user... they won't get the dirty lobby update anymore
-											lobby.DirtyRetransmitToSingleMember(KickedUserID);
+											await lobby.DirtyRetransmitToSingleMember(KickedUserID);
 										}
 									}
 								}

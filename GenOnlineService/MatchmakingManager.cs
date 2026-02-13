@@ -496,7 +496,7 @@ static class MatchmakingManager
 			return true;
 		}
 
-		public async void MergeWithOtherBucket(MatchmakingBucket bucketToMerge)
+		public async Task MergeWithOtherBucket(MatchmakingBucket bucketToMerge)
 		{
 			// copy over players
 			foreach (MatchmakingBucketMember rhsMember in bucketToMerge.m_lstMembers)
@@ -664,7 +664,7 @@ static class MatchmakingManager
 
 		Int64 m_LobbyID = -1;
 		Int64 m_StartTime = -1;
-		public async void Tick()
+		public async Task Tick()
 		{
 			// TODO_QUICKMATCH: What if the playlist is null? is this even possible since we validated before creating the bucket
 			if (g_Playlists.TryGetValue(PlaylistID, out Playlist? playlist))
@@ -907,7 +907,8 @@ static class MatchmakingManager
 
 		// TODO_MATCHMAKING: Delete buckets if participants becomes 0
 	}
-	private static ConcurrentDictionary<UInt16, ConcurrentList<MatchmakingBucket>> m_dictMatchmakingBuckets = new();
+	// Using ConcurrentBag instead of ConcurrentList for lock-free bucket management
+	private static ConcurrentDictionary<UInt16, ConcurrentBag<MatchmakingBucket>> m_dictMatchmakingBuckets = new();
 
 	// TODO_QUICKMATCH: Read from db or file
 	private static Dictionary<UInt16, Playlist> g_Playlists = new()
@@ -988,7 +989,7 @@ static class MatchmakingManager
 		{
 			foreach (var kvPair in g_Playlists)
 			{
-				m_dictMatchmakingBuckets.TryAdd(kvPair.Key, new ConcurrentList<MatchmakingBucket>());
+				m_dictMatchmakingBuckets.TryAdd(kvPair.Key, new ConcurrentBag<MatchmakingBucket>());
 			}
 		}
 
@@ -1002,7 +1003,7 @@ static class MatchmakingManager
 				// if we've already been merged and are awaiting delayed deletion, dont process it anymore
 				if (!lstBucketsMergedNeedingDeleted.Contains(mmBucket))
 				{
-					mmBucket.Tick();
+					await mmBucket.Tick();
 
 					// try to merge with any other bucket within this playlist
 					foreach (MatchmakingBucket mmBucketMergeCandidate in kvPair.Value)
@@ -1014,7 +1015,7 @@ static class MatchmakingManager
 							{
 								if (mmBucket.CanMergeWithOtherBucket(mmBucketMergeCandidate))
 								{
-									mmBucket.MergeWithOtherBucket(mmBucketMergeCandidate);
+									await mmBucket.MergeWithOtherBucket(mmBucketMergeCandidate);
 
 									lstBucketsMergedNeedingDeleted.Add(mmBucketMergeCandidate);
 								}
@@ -1031,9 +1032,11 @@ static class MatchmakingManager
 		// cleanup any pending destruction (cannot do this in tick, collection will be modified)
 		foreach (MatchmakingBucket bucket in m_lstBucketsPendingDeletion)
 		{
-			if (m_dictMatchmakingBuckets.ContainsKey(bucket.PlaylistID))
+			if (m_dictMatchmakingBuckets.TryGetValue(bucket.PlaylistID, out var bucketBag))
 			{
-				m_dictMatchmakingBuckets[bucket.PlaylistID].Remove(bucket);
+				// ConcurrentBag doesn't support Remove, so we filter and rebuild
+				var remainingBuckets = bucketBag.Where(b => b != bucket).ToList();
+				m_dictMatchmakingBuckets[bucket.PlaylistID] = new ConcurrentBag<MatchmakingBucket>(remainingBuckets);
 			}
 		}
 		m_lstBucketsPendingDeletion.Clear();

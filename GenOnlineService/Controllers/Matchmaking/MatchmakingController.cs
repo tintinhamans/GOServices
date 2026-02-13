@@ -71,7 +71,7 @@ namespace GenOnlineService.Controllers
 					{
 						UInt16 playlistID = data["playlist"].GetUInt16();
 						var array = data["maps"].EnumerateArray();
-						List<int> mapIndices = array.ToList().Select(x => x.GetInt32()).ToList();
+						List<int> mapIndices = array.Select(x => x.GetInt32()).ToList();
 						UInt32 exe_crc = data["exe_crc"].GetUInt32();
 						UInt32 ini_crc = data["ini_crc"].GetUInt32();
 
