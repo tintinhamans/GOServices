@@ -47,8 +47,41 @@ using System.Threading.RateLimiting;
 
 namespace GenOnlineService
 {
+	public static class IPHelpers
+	{
+		public static string NormalizeIP(string? ipAddress)
+		{
+			if (string.IsNullOrEmpty(ipAddress))
+			{
+				return "unknown";
+			}
+
+			if (System.Net.IPAddress.TryParse(ipAddress, out System.Net.IPAddress? addr))
+			{
+				// Convert IPv6-mapped IPv4 (::ffff:127.0.0.1) to IPv4 (127.0.0.1)
+				if (addr.IsIPv4MappedToIPv6)
+				{
+					return addr.MapToIPv4().ToString();
+				}
+
+				// Treat all localhost addresses as 127.0.0.1
+				if (System.Net.IPAddress.IsLoopback(addr))
+				{
+					return "127.0.0.1";
+				}
+
+				return addr.ToString();
+			}
+
+			return ipAddress;
+		}
+	}
+
 	public static class APIKeyHelpers
 	{
+		private static HashSet<string>? s_cachedApiKeys = null;
+		private static readonly object s_cacheLock = new object();
+
 		public static bool ValidateKey(string strKey)
 		{
 			if (Program.g_Config == null)
@@ -56,22 +89,32 @@ namespace GenOnlineService
 				return false;
 			}
 
-			// TODO_DISCORD: Cache this
-			IConfiguration? apiSettings = Program.g_Config.GetSection("API");
-
-			if (apiSettings == null)
+			// Use cached HashSet for O(1) lookup
+			if (s_cachedApiKeys == null)
 			{
-				return false;
+				lock (s_cacheLock)
+				{
+					if (s_cachedApiKeys == null)
+					{
+						IConfiguration? apiSettings = Program.g_Config.GetSection("API");
+						if (apiSettings == null)
+						{
+							return false;
+						}
+
+						List<string>? api_keys = apiSettings.GetSection("keys").Get<List<string>>();
+						if (api_keys == null)
+						{
+							return false;
+						}
+
+						// Convert to HashSet and uppercase all keys for O(1) lookup
+						s_cachedApiKeys = new HashSet<string>(api_keys.Select(k => k.ToUpper()), StringComparer.OrdinalIgnoreCase);
+					}
+				}
 			}
 
-			List<string>? api_keys = apiSettings.GetSection("keys").Get<List<string>>();
-			if (api_keys == null)
-			{
-				return false;
-			}
-
-			// TODO: Optimize lookup
-			return api_keys.Contains(strKey.ToUpper());
+			return s_cachedApiKeys.Contains(strKey);
 		}
 	}
 	public static class CertHelpers
@@ -253,7 +296,8 @@ namespace GenOnlineService
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference. (Appears to be erroronous flagging)
 #pragma warning disable CS8604 // null reference. (Appears to be erroronous flagging)
-				if (context.Principal.Claims.First() == null || !Int64.TryParse(context.Principal.Claims.First().Value, out Int64 userID))
+				Claim? userIdClaim = context.Principal.FindFirst(ClaimTypes.NameIdentifier);
+				if (userIdClaim == null || !Int64.TryParse(userIdClaim.Value, out Int64 userID))
 				{
 					context.Fail("Failed Validation #2");
 				}
@@ -280,29 +324,42 @@ namespace GenOnlineService
 
 				string strTypeClaim = firstType.Value;
 				JwtTokenGenerator.ETokenType tokenType = (JwtTokenGenerator.ETokenType)Convert.ToInt32(strTypeClaim);
-				bool bIsLoginWithToken = context.Request.Path.ToString().ToLower().Contains("loginwithtoken");
-				if (bIsLoginWithToken && tokenType != JwtTokenGenerator.ETokenType.Refresh)
+
+				// Use claim-based validation instead of path-based to prevent bypass
+				if (tokenType == JwtTokenGenerator.ETokenType.Refresh)
 				{
-					context.Fail("Failed Validation #5");
+					bool bIsLoginWithToken = context.Request.Path.ToString().ToLower().Contains("loginwithtoken");
+					if (!bIsLoginWithToken)
+					{
+						context.Fail("Failed Validation #5 - Refresh token used on non-refresh endpoint");
+					}
 				}
-				else if (!bIsLoginWithToken && tokenType != JwtTokenGenerator.ETokenType.Session)
+				else if (tokenType == JwtTokenGenerator.ETokenType.Session)
 				{
-					context.Fail("Failed Validation #6");
+					bool bIsLoginWithToken = context.Request.Path.ToString().ToLower().Contains("loginwithtoken");
+					if (bIsLoginWithToken)
+					{
+						context.Fail("Failed Validation #6 - Session token used on refresh endpoint");
+					}
+				}
+				else
+				{
+					context.Fail("Failed Validation #10 - Unknown token type");
 				}
 
 				if (context.Principal.FindFirst(JwtRegisteredClaimNames.Address) == null)
 				{
 					context.Fail("Failed Validation #7");
 				}
+
+				string strExpectedIP = context.Principal.FindFirst(JwtRegisteredClaimNames.Address).Value;
+				string currentIP = IPHelpers.NormalizeIP(context.HttpContext.Connection.RemoteIpAddress?.ToString());
+				if (strExpectedIP != currentIP)
+				{
+					context.Fail("Failed Validation #8 - IP mismatch");
+				}
 #pragma warning restore CS8602 // Dereference of a possibly null reference.
 #pragma warning restore CS8604 // Dereference of a possibly null reference.
-				/*
-				string strExpectedIP = context.Principal.FindFirst(JwtRegisteredClaimNames.Address).Value;
-				if (strExpectedIP != context.HttpContext.Connection.RemoteIpAddress.ToString())
-				{
-					context.Fail("Failed Validation #8");
-				}
-				*/
 			}
 			catch
 			{
@@ -326,7 +383,7 @@ namespace GenOnlineService
 				Session,
 				Refresh
 			}
-			
+
 			public string GenerateToken(string displayname, Int64 userID, string ipAddr, ETokenType tokenType, string client_id, bool bIsAdmin)
 			{
 				var jwtSettings = _configuration.GetSection("JwtSettings");
@@ -401,11 +458,14 @@ namespace GenOnlineService
 			return ws_address;
 		}
 
-		public static void Main(string[] args)
+		public static async Task Main(string[] args)
 		{
 #if !DEBUG
 			AppDomain.CurrentDomain.UnhandledException += GlobalExceptionHandler;
 #endif
+
+			// Configure thread pool for better performance under load
+			ThreadPool.SetMinThreads(200, 200);
 
 			var builder = WebApplication.CreateBuilder(args);
 
@@ -455,7 +515,7 @@ namespace GenOnlineService
 					options.AutoSessionTracking = true;
 				});
 			}
-			
+
 
 			// create discord?
 			var discordSettings = Program.g_Config.GetSection("Discord");
@@ -465,12 +525,12 @@ namespace GenOnlineService
 				g_Discord = new DiscordBot();
 			}
 
-			GlobalDatabaseInstance.g_Database.Initialize();
+			await GlobalDatabaseInstance.g_Database.Initialize();
 
 			// do a cleanup on startup
 			DoCleanup(true);
 
-			
+
 
 			builder.Services.AddRateLimiter(options =>
 			{
@@ -490,6 +550,21 @@ namespace GenOnlineService
 						QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
 						QueueLimit = 10
 					});
+				});
+			});
+
+			builder.Services.AddCors(options =>
+			{
+				options.AddDefaultPolicy(policy =>
+				{
+					policy.WithOrigins(
+						"https://localhost:9000",
+						"http://localhost:9001",
+						"https://*.playgenerals.online"
+					)
+					.AllowAnyHeader()
+					.AllowAnyMethod()
+					.AllowCredentials();
 				});
 			});
 
@@ -578,6 +653,30 @@ namespace GenOnlineService
 					}));
 			});
 
+			// Add in-memory caching for performance optimization
+			builder.Services.AddMemoryCache(options =>
+			{
+				options.SizeLimit = 10000; // Limit cache entries
+			});
+
+			// Add response compression for bandwidth optimization (60-80% reduction)
+			builder.Services.AddResponseCompression(options =>
+			{
+				options.EnableForHttps = true;
+				options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+				options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+			});
+
+			builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(options =>
+			{
+				options.Level = System.IO.Compression.CompressionLevel.Fastest; // Balance speed vs compression
+			});
+
+			builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(options =>
+			{
+				options.Level = System.IO.Compression.CompressionLevel.Fastest;
+			});
+
 			// JSON options needed to avoid ASP.NET lower casing everything
 			builder.Services.AddControllers().AddJsonOptions(options =>
 			{
@@ -609,27 +708,27 @@ namespace GenOnlineService
 				return;
 			}
 
-            if (!use_os_cert_store) // if not using the cert store, we need a pem and key
-            {
-                if (cert_pem_path == null)
-                {
-                    Console.WriteLine("FATAL ERROR: cert_pem_path is not set in the config");
-                    Console.ReadKey(true);
-                    return;
-                }
+			if (!use_os_cert_store) // if not using the cert store, we need a pem and key
+			{
+				if (cert_pem_path == null)
+				{
+					Console.WriteLine("FATAL ERROR: cert_pem_path is not set in the config");
+					Console.ReadKey(true);
+					return;
+				}
 
-                if (cert_key_path == null)
-                {
-                    Console.WriteLine("FATAL ERROR: cert_key_path is not set in the config");
-                    Console.ReadKey(true);
-                    return;
-                }
-            }
+				if (cert_key_path == null)
+				{
+					Console.WriteLine("FATAL ERROR: cert_key_path is not set in the config");
+					Console.ReadKey(true);
+					return;
+				}
+			}
 
 
-            //UInt16 port = coreSettings.GetValue<UInt16>("port");
+			//UInt16 port = coreSettings.GetValue<UInt16>("port");
 
-            bool bShouldUseOSCertSTore = (bool)use_os_cert_store;
+			bool bShouldUseOSCertSTore = (bool)use_os_cert_store;
 			if (!bShouldUseOSCertSTore)
 			{
 				if (String.IsNullOrEmpty(cert_pem_path) || String.IsNullOrEmpty(cert_key_path))
@@ -642,7 +741,7 @@ namespace GenOnlineService
 				{
 					//X509Certificate2 = CertHelpers.LoadPemWithPrivateKey(cert_pem_path, cert_key_path);
 
-					X509Certificate2  = X509Certificate2.CreateFromPemFile(cert_pem_path, cert_key_path);
+					X509Certificate2 = X509Certificate2.CreateFromPemFile(cert_pem_path, cert_key_path);
 
 
 					if (X509Certificate2 == null)
@@ -680,7 +779,7 @@ namespace GenOnlineService
 			{
 				Console.WriteLine("ERROR: Failed to parse port from serverURI: " + serverURI);
 			}
-			
+
 
 
 			// options
@@ -709,6 +808,9 @@ namespace GenOnlineService
 
 			app.UseRateLimiter();
 
+			// Enable response compression (must be early in pipeline)
+			app.UseResponseCompression();
+
 			// websocket
 
 			var webSocketOptions = new WebSocketOptions
@@ -728,7 +830,7 @@ namespace GenOnlineService
 			}
 			*/
 
-		app.Use((context, next) =>
+			app.Use((context, next) =>
 			{
 				context.Request.EnableBuffering();
 				return next();
@@ -736,10 +838,11 @@ namespace GenOnlineService
 
 			//app.UseHttpsRedirection();
 
+			app.UseCors();
 			app.UseAuthentication();
 			app.UseAuthorization();
 
-			Database.MySQLInstance.TestQuery(GlobalDatabaseInstance.g_Database).Wait();
+			await Database.MySQLInstance.TestQuery(GlobalDatabaseInstance.g_Database);
 
 			app.MapControllers();
 
@@ -751,7 +854,7 @@ namespace GenOnlineService
 				await WebSocketManager.CheckForTimeouts();
 
 				int numLobbies = LobbyManager.GetNumLobbies();
-				StatsTracker.Update(numLobbies, WebSocketManager.GetUserDataCache().Count).Wait();
+				await StatsTracker.Update(numLobbies, WebSocketManager.GetUserDataCache().Count);
 
 				timerCleanup.Start();
 
@@ -779,11 +882,11 @@ namespace GenOnlineService
 			{
 				System.Timers.Timer timerTick = new System.Timers.Timer(5); // 5ms tick
 				timerTick.AutoReset = false;
-				timerTick.Elapsed += (sender, e) =>
+				timerTick.Elapsed += async (sender, e) =>
 				{
-					LobbyManager.Tick();
+					await LobbyManager.Tick();
 
-					WebSocketManager.Tick();
+					await WebSocketManager.Tick();
 
 					timerTick.Start();
 				};
@@ -818,17 +921,17 @@ namespace GenOnlineService
 
 			// timer to save daily stats
 			{
-                System.Timers.Timer timerTick = new System.Timers.Timer(60000); // 60s tick
-                timerTick.AutoReset = false;
-                timerTick.Elapsed += async (sender, e) =>
-                {
-                    // save daily stats
-                    await DailyStatsManager.SaveToDB();
-                };
-                timerTick.Start();
-            }
+				System.Timers.Timer timerTick = new System.Timers.Timer(60000); // 60s tick
+				timerTick.AutoReset = false;
+				timerTick.Elapsed += async (sender, e) =>
+				{
+					// save daily stats
+					await DailyStatsManager.SaveToDB();
+				};
+				timerTick.Start();
+			}
 
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+			AppDomain.CurrentDomain.ProcessExit += (_, _) =>
 			{
 				Console.ForegroundColor = ConsoleColor.Red;
 				Console.WriteLine("EXIT REQUESTED!");
@@ -837,19 +940,19 @@ namespace GenOnlineService
 			// create a token
 			g_tokenGenerator = new JwtTokenGenerator(builder.Configuration);
 
-            // load daily stats
+			// load daily stats
 			// TODO_SOCIAL: await
 #pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-            DailyStatsManager.LoadFromDB();
+			DailyStatsManager.LoadFromDB();
 #pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
 
 
-            app.Run();
+			app.Run();
 
 			// shutdown
 			BackgroundS3Uploader.Shutdown();
 
-        }
+		}
 
 		public static void ShowLogo()
 		{

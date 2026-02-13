@@ -68,7 +68,7 @@ namespace GenOnlineService.Controllers
 				return;
 			}
 
-			string ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
+			string ipAddress = IPHelpers.NormalizeIP(HttpContext.Connection.RemoteIpAddress?.ToString());
 			string ipContinent = "NA";
 			string ipCountry = "US";
 			double dLongitude = 38.8977; // the whitehouse;
