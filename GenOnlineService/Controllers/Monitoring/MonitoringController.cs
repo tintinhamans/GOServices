@@ -207,7 +207,7 @@ namespace GenOnlineService.Controllers
 		[HttpGet]
 		// TODO: Undo all of these and make all flows use gethttpsize/head
 #if !DEBUG
-		public APIResult? Monitor_VersionCheck()
+		public async Task<APIResult?> Monitor_VersionCheck()
 #else
 		public async Task<APIResult?> Monitor_VersionCheck()
 #endif
@@ -223,7 +223,7 @@ namespace GenOnlineService.Controllers
 				{
 					GenOnlineService.Controllers.VersionCheckController versionCheckController = new GenOnlineService.Controllers.VersionCheckController();
 #if !DEBUG
-				APIResult internalResult = VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}");
+				APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}");
 #else
 					APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}");
 #endif

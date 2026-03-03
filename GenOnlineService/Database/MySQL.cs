@@ -1,4 +1,4 @@
-﻿/*
+/*
 **    GeneralsOnline Game Services - Backend Services for Command & Conquer Generals Online: Zero Hour
 **    Copyright (C) 2025  GeneralsOnline Development Team
 **
@@ -1998,7 +1998,8 @@ namespace Database
 	// Updated MySQLInstance class to fix memory leaks by ensuring proper disposal of resources.
 	public class MySQLInstance : IDisposable
 	{
-		//private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+		// Serializes all queries on the shared m_Connection (MySqlConnection is not thread-safe)
+		private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
 
 		// Cached database configuration to avoid parsing config on every query
 		private static class CachedDbConfig
@@ -2062,7 +2063,7 @@ namespace Database
                     m_Connection = null;
                 }
 #endif
-				//_semaphore.Dispose();
+				_semaphore.Dispose();
 			}
 		}
 
@@ -2152,7 +2153,7 @@ namespace Database
 				//Console.WriteLine(String.Format("Server={0}; database={1}; user={2}; password={3}; port={4};Pooling=true;Connect Timeout=100;MinimumPoolSize=1;maximumpoolsize=100;AllowUserVariables=true;ConnectionReset=false;SslMode=Required;", dbSettings));
 
 				Console.WriteLine("Connecting to DB...");
-				m_Connection.Open();
+				await m_Connection.OpenAsync().ConfigureAwait(false);
 
 				Console.WriteLine("Connected to: " + m_Connection.ServerVersion);
 
@@ -2248,7 +2249,7 @@ namespace Database
 
 			try
 			{
-				//await _semaphore.WaitAsync();
+				await _semaphore.WaitAsync().ConfigureAwait(false);
 				semaphoreAcquired = true;
 				m_LastQueryTime = DateTime.Now;
 
@@ -2355,13 +2356,13 @@ namespace Database
 
 						File.WriteAllText(Path.Combine("Exceptions", "MYSQL_2_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".txt"), "MySQL Query Error:" + strExceptionMsg);
 
-						Initialize(false);
-						// Ensure semaphore is released before recursive call
+							// Release semaphore before reconnect; Initialize calls Query internally
 						if (semaphoreAcquired)
 						{
-							//_semaphore.Release();
+							_semaphore.Release();
 							semaphoreAcquired = false;
 						}
+						await Initialize(false).ConfigureAwait(false);
 						return await Query(commandStr, dictCommandValues, attempt + 1).ConfigureAwait(false);
 					}
 					catch (MySqlException ex)
@@ -2378,7 +2379,7 @@ namespace Database
 						// Ensure semaphore is released before throwing
 						if (semaphoreAcquired)
 						{
-							//_semaphore.Release();
+							_semaphore.Release();
 							semaphoreAcquired = false;
 						}
 
@@ -2399,7 +2400,7 @@ namespace Database
 			{
 				if (semaphoreAcquired)
 				{
-					//_semaphore.Release();
+					_semaphore.Release();
 				}
 #if USE_PER_QUERY_CONNECTION
 				if (connection != null)

@@ -140,6 +140,7 @@ namespace GenOnlineService.Controllers.LoginWithToken
 
 		// get JWKS
 		using var http = new HttpClient();
+		http.Timeout = TimeSpan.FromSeconds(10);
 		var jwks = await http.GetFromJsonAsync<Jwks>(middleware_jwks_endpoint);
 
 		var key = jwks.Keys.FirstOrDefault(k => k.Kid == kid);

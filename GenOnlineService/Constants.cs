@@ -1707,6 +1707,7 @@ namespace GenOnlineService
 				}
 			}))
 			{
+				client.Timeout = TimeSpan.FromSeconds(10);
 				client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", TurnToken));
 				client.DefaultRequestHeaders.Add("Accept", "application/json");
 				//client.DefaultRequestHeaders.Add("Content-Type", "application/json");
@@ -1818,6 +1819,7 @@ namespace GenOnlineService
 					}
 				}))
 				{
+					client.Timeout = TimeSpan.FromSeconds(10);
 					client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", TurnToken));
 					client.DefaultRequestHeaders.Add("Accept", "application/json");
 					try

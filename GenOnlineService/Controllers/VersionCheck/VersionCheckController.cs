@@ -74,7 +74,7 @@ namespace GenOnlineService.Controllers
 				string jsonData = await reader.ReadToEndAsync();
 
 #if !DEBUG
-				return VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData);
 #else
 				return await VersionHelper.Post_InternalHandler(jsonData);
 #endif
@@ -100,7 +100,7 @@ namespace GenOnlineService.Controllers
 				string jsonData = await reader.ReadToEndAsync();
 
 #if !DEBUG
-				return VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData);
 #else
 				return await VersionHelper.Post_InternalHandler(jsonData);
 #endif
@@ -111,7 +111,7 @@ namespace GenOnlineService.Controllers
 	class VersionHelper
 	{
 #if !DEBUG
-		public static APIResult Post_InternalHandler(string jsonData)
+		public static async Task<APIResult> Post_InternalHandler(string jsonData)
 #else
 		public static async Task<APIResult> Post_InternalHandler(string jsonData)
 #endif
