@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.Extensions.Options;
 using System;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Security.Claims;
@@ -322,6 +323,36 @@ namespace GenOnlineService.Controllers
 			return null;
 		}
 
+		enum ELobbyUpdatePermissions
+		{
+			Anyone,
+			LobbyOwner
+		}
+
+		private static ConcurrentDictionary<ELobbyUpdateField, ELobbyUpdatePermissions> g_dictLobbyUpdatePermissionsTable = new()
+		{
+			[ELobbyUpdateField.LOBBY_MAP] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.MY_SIDE] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.MY_COLOR] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.MY_START_POS] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.MY_TEAM] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.LOBBY_STARTING_CASH] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.LOBBY_LIMIT_SUPERWEAPONS] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.HOST_ACTION_FORCE_START] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.LOCAL_PLAYER_HAS_MAP] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.UNUSED] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.UNUSED_2] = ELobbyUpdatePermissions.Anyone,
+			[ELobbyUpdateField.HOST_ACTION_KICK_USER] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.HOST_ACTION_SET_SLOT_STATE] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.AI_SIDE] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.AI_COLOR] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.AI_TEAM] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.AI_START_POS] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.MAX_CAMERA_HEIGHT] = ELobbyUpdatePermissions.LobbyOwner,
+			[ELobbyUpdateField.JOINABILITY] = ELobbyUpdatePermissions.LobbyOwner
+		};
+
+
 		[HttpPost("{lobbyID}")]
 		[Authorize(Roles = "Player")]
 		public async Task<APIResult> Post(Int64 lobbyID)
@@ -366,6 +397,19 @@ namespace GenOnlineService.Controllers
 
 								// TODO: Safety
 								ELobbyUpdateField field = (ELobbyUpdateField)data["field"].GetInt32();
+
+								// check permissions
+								ELobbyUpdatePermissions updatePerms = g_dictLobbyUpdatePermissionsTable[field];
+
+								if (updatePerms == ELobbyUpdatePermissions.LobbyOwner) // check owner
+								{
+									if (user_id != lobby.Owner)
+									{
+										Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+										result.success = false;
+										return result;
+									}
+								}
 
 								// reset everyones ready states when anything changes (minus dummy actions)
 								if (field != ELobbyUpdateField.HOST_ACTION_FORCE_START
@@ -440,20 +484,14 @@ namespace GenOnlineService.Controllers
 								{
 									if (data.ContainsKey("limit_superweapons"))
 									{
-										if (user_id == lobby.Owner)
-										{
-											bool bLimitSuperweapons = data["limit_superweapons"].GetBoolean();
-											await lobby.UpdateLimitSuperweapons(bLimitSuperweapons);
-										}
+										bool bLimitSuperweapons = data["limit_superweapons"].GetBoolean();
+										await lobby.UpdateLimitSuperweapons(bLimitSuperweapons);
 									}
 								}
 								else if (field == ELobbyUpdateField.HOST_ACTION_FORCE_START)
 								{
 									// dummy action... just force everyone ready
-									if (user_id == lobby.Owner)
-									{
-										lobby.ForceReady();
-									}
+									lobby.ForceReady();
 								}
 								else if (field == ELobbyUpdateField.LOCAL_PLAYER_HAS_MAP)
 								{
@@ -468,43 +506,36 @@ namespace GenOnlineService.Controllers
 								{
 									if (data.ContainsKey("userid"))
 									{
-										if (user_id == lobby.Owner)
+										// TODO: we should communicate the kick to the user...
+										Int64 KickedUserID = data["userid"].GetInt64();
+
+										LobbyManager.LeaveSpecificLobby(KickedUserID, lobbyID);
+
+										// cleanup TURN credentials
+										TURNCredentialManager.DeleteCredentialsForUser(KickedUserID);
+
+										// clear our lobby ID
+										UserSession? sourceData = WebSocketManager.GetDataFromUser(KickedUserID);
+
+										if (sourceData != null)
 										{
-											// TODO: we should communicate the kick to the user...
-											Int64 KickedUserID = data["userid"].GetInt64();
-
-											LobbyManager.LeaveSpecificLobby(KickedUserID, lobbyID);
-
-											// cleanup TURN credentials
-											TURNCredentialManager.DeleteCredentialsForUser(KickedUserID);
-
-											// clear our lobby ID
-											UserSession? sourceData = WebSocketManager.GetDataFromUser(KickedUserID);
-
-											if (sourceData != null)
-											{
-												sourceData.UpdateSessionLobbyID(-1);
-												// NOTE: We dont update the match history match ID here, that is done by the match history service
-											}
-
-											// we have to manually send to the kicked user... they won't get the dirty lobby update anymore
-											await lobby.DirtyRetransmitToSingleMember(KickedUserID);
+											sourceData.UpdateSessionLobbyID(-1);
+											// NOTE: We dont update the match history match ID here, that is done by the match history service
 										}
+
+										// we have to manually send to the kicked user... they won't get the dirty lobby update anymore
+										await lobby.DirtyRetransmitToSingleMember(KickedUserID);
 									}
 								}
 								else if (field == ELobbyUpdateField.HOST_ACTION_SET_SLOT_STATE)
 								{
-									// must be host
-									if (user_id == lobby.Owner)
-									{
-										UInt16 slot_index = data["slot_index"].GetUInt16();
-										EPlayerType slot_state = (EPlayerType)data["slot_state"].GetUInt16();
+									UInt16 slot_index = data["slot_index"].GetUInt16();
+									EPlayerType slot_state = (EPlayerType)data["slot_state"].GetUInt16();
 
-										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot_index);
-										if (TargetMember != null)
-										{
-											TargetMember.SetPlayerSlotState(slot_state);
-										}
+									LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot_index);
+									if (TargetMember != null)
+									{
+										TargetMember.SetPlayerSlotState(slot_state);
 									}
 								}
 								else if (field == ELobbyUpdateField.AI_SIDE)
@@ -514,19 +545,16 @@ namespace GenOnlineService.Controllers
 										&& data.ContainsKey("start_pos")
 										)
 									{
-										if (user_id == lobby.Owner)
-										{
-											int slot = data["slot"].GetInt32();
-											int side = data["side"].GetInt32();
-											int start_pos = data["start_pos"].GetInt32();
+										int slot = data["slot"].GetInt32();
+										int side = data["side"].GetInt32();
+										int start_pos = data["start_pos"].GetInt32();
 
-											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
-											if (TargetMember != null)
+										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+										if (TargetMember != null)
+										{
+											if (TargetMember.IsAI())
 											{
-												if (TargetMember.IsAI())
-												{
-													await TargetMember.UpdateSide(side, start_pos);
-												}
+												await TargetMember.UpdateSide(side, start_pos);
 											}
 										}
 									}
@@ -536,18 +564,15 @@ namespace GenOnlineService.Controllers
 									if (data.ContainsKey("slot")
 										&& data.ContainsKey("color"))
 									{
-										if (user_id == lobby.Owner)
-										{
-											int slot = data["slot"].GetInt32();
-											int color = data["color"].GetInt32();
+										int slot = data["slot"].GetInt32();
+										int color = data["color"].GetInt32();
 
-											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
-											if (TargetMember != null)
+										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+										if (TargetMember != null)
+										{
+											if (TargetMember.IsAI())
 											{
-												if (TargetMember.IsAI())
-												{
-													await TargetMember.UpdateColor(color);
-												}
+												await TargetMember.UpdateColor(color);
 											}
 										}
 									}
@@ -557,18 +582,15 @@ namespace GenOnlineService.Controllers
 									if (data.ContainsKey("slot")
 										&& data.ContainsKey("team"))
 									{
-										if (user_id == lobby.Owner)
-										{
-											int slot = data["slot"].GetInt32();
-											int team = data["team"].GetInt32();
+										int slot = data["slot"].GetInt32();
+										int team = data["team"].GetInt32();
 
-											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
-											if (TargetMember != null)
+										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+										if (TargetMember != null)
+										{
+											if (TargetMember.IsAI())
 											{
-												if (TargetMember.IsAI())
-												{
-													TargetMember.UpdateTeam(team);
-												}
+												TargetMember.UpdateTeam(team);
 											}
 										}
 									}
@@ -578,19 +600,16 @@ namespace GenOnlineService.Controllers
 									if (data.ContainsKey("slot")
 										&& data.ContainsKey("start_pos"))
 									{
-										if (user_id == lobby.Owner)
-										{
-											// TODO: All these AI funcs should check the player being operated upon is AI, otherwise host could use fiddler to alter other users
-											int slot = data["slot"].GetInt32();
-											int start_pos = data["start_pos"].GetInt32();
+										// TODO: All these AI funcs should check the player being operated upon is AI, otherwise host could use fiddler to alter other users
+										int slot = data["slot"].GetInt32();
+										int start_pos = data["start_pos"].GetInt32();
 
-											LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
-											if (TargetMember != null)
+										LobbyMember? TargetMember = lobby.GetMemberFromSlot(slot);
+										if (TargetMember != null)
+										{
+											if (TargetMember.IsAI())
 											{
-												if (TargetMember.IsAI())
-												{
-													TargetMember.UpdateStartPos(start_pos);
-												}
+												TargetMember.UpdateStartPos(start_pos);
 											}
 										}
 									}
@@ -599,21 +618,15 @@ namespace GenOnlineService.Controllers
 								{
 									if (data.ContainsKey("max_camera_height"))
 									{
-										if (user_id == lobby.Owner)
-										{
-											UInt16 maxCameraHeight = data["max_camera_height"].GetUInt16();
-											lobby.UpdateMaxCameraHeight(maxCameraHeight);
-										}
+										UInt16 maxCameraHeight = data["max_camera_height"].GetUInt16();
+										lobby.UpdateMaxCameraHeight(maxCameraHeight);
 									}
 								}
 								else if (field == ELobbyUpdateField.JOINABILITY)
 								{
-                                    if (user_id == lobby.Owner)
-                                    {
-                                        ELobbyJoinability newLobbyJoinability = (ELobbyJoinability)data["joinability"].GetInt32();
-                                        lobby.UpdateJoinability(newLobbyJoinability);
-                                    }
-                                }
+									ELobbyJoinability newLobbyJoinability = (ELobbyJoinability)data["joinability"].GetInt32();
+									lobby.UpdateJoinability(newLobbyJoinability);
+								}
                             }
                         }
 
