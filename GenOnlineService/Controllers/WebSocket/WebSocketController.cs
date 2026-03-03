@@ -141,34 +141,11 @@ namespace GenOnlineService.Controllers
 					receiveResult = await webSocket.ReceiveAsync(
 						new ArraySegment<byte>(buffer), cts.Token);
 				}
-				catch (OperationCanceledException ex)
+				catch (OperationCanceledException)
 				{
-					// send a ping
+					// No message received in 30s — send a keep-alive pong and continue waiting
 					wsSess.SendPong();
-
-					{
-						// log it to sentry
-						var customEvent = new SentryEvent
-						{
-							Message = "Websocket Disconnect A:" + ex.ToString(),
-							Level = SentryLevel.Error
-						};
-
-						// Add custom tags
-						customEvent.SetTag("websocket", "error_1");
-						customEvent.SetTag("user_id", wsSess.m_UserID.ToString());
-
-						// Add extra data
-						customEvent.SetExtra("user_id_tag", wsSess.m_UserID);
-
-						// Capture the event
-						SentrySdk.CaptureEvent(customEvent);
-
-						// flush
-						await SentrySdk.FlushAsync();
-					}
-
-					break;
+					continue;
 				}
 				catch (Exception ex)
 				{
