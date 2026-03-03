@@ -698,6 +698,9 @@ namespace GenOnlineService.Controllers
 
 								if (playerSession != null)
 								{
+									// leave any lobby
+									LobbyManager.LeaveAnyLobby(user_id);
+
 									string strDisplayName = await Database.Functions.Auth.GetDisplayName(GlobalDatabaseInstance.g_Database, user_id);
 									bool bJoinedSuccessfully = await LobbyManager.JoinLobby(lobby, playerSession, strDisplayName, userPreferredPort, bHasMap);
 

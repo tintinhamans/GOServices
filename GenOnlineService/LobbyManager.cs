@@ -477,6 +477,12 @@ namespace GenOnlineService
 		private readonly SemaphoreSlim g_SlotLock = new SemaphoreSlim(1, 1);
 		public async Task<bool> AddMember(UserSession playerSession, string strDisplayName, UInt16 userPreferredPort, bool bHasMap, UserLobbyPreferences lobbyPrefs)
 		{
+			LobbyMember? existingMember = GetMemberFromUserID(playerSession.m_UserID);
+			if (existingMember != null) // we're already in this lobby
+			{
+				return false;
+			}
+
 			// NOTE: AddMember is called async, so timing + slot determination could result in players being inserted in the same slot
 			await g_SlotLock.WaitAsync();
 			try
