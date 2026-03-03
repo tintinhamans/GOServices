@@ -151,29 +151,7 @@ namespace GenOnlineService.Controllers
 				{
 					// Log unexpected errors
 					Console.WriteLine($"WebSocket error: {ex}");
-
-					{
-						// log it to sentry
-						var customEvent = new SentryEvent
-						{
-							Message = "Websocket Disconnect B: " + ex.ToString(),
-							Level = SentryLevel.Error
-						};
-
-						// Add custom tags
-						customEvent.SetTag("websocket", "error_2");
-						customEvent.SetTag("user_id", wsSess.m_UserID.ToString());
-
-						// Add extra data
-						customEvent.SetExtra("user_id_tag", wsSess.m_UserID);
-
-						// Capture the event
-						SentrySdk.CaptureEvent(customEvent);
-
-						// flush
-						await SentrySdk.FlushAsync();
-					}
-
+					SentrySdk.CaptureException(ex);
 					break;
 				}
 
