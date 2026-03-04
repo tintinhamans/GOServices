@@ -132,14 +132,36 @@ public class DiscordBot
 	{
 		try
 		{
-			string strFormattedChatMsg = String.Format("[{0} - UID {1}] {2}", strDisplayName, userID, strMessage);
+            if (Program.g_Config == null)
+            {
+                return;
+            }
 
-			ISocketMessageChannel? channel = GetChannel(EDiscordChannelIDs.NetworkRoomChat);
-			if (channel != null)
+            IConfiguration? discordSettings = Program.g_Config.GetSection("Discord");
+
+            if (discordSettings == null)
+            {
+                return;
+            }
+
+            bool discord_send_room_chat_to_discord = discordSettings.GetValue<bool>("send_room_chat_to_discord");
+
+            if (discord_send_room_chat_to_discord == null)
+            {
+                return;
+            }
+
+			if (discord_send_room_chat_to_discord)
 			{
-				string strDiscordMsg = String.Format("[NETWORK ROOM CHAT ID #{0}] {1}", roomID, strFormattedChatMsg);
-				await channel.SendMessageAsync(strDiscordMsg).ConfigureAwait(true);
-			}
+                string strFormattedChatMsg = String.Format("[{0} - UID {1}] {2}", strDisplayName, userID, strMessage);
+
+                ISocketMessageChannel? channel = GetChannel(EDiscordChannelIDs.NetworkRoomChat);
+                if (channel != null)
+                {
+                    string strDiscordMsg = String.Format("[NETWORK ROOM CHAT ID #{0}] {1}", roomID, strFormattedChatMsg);
+                    await channel.SendMessageAsync(strDiscordMsg).ConfigureAwait(true);
+                }
+            }
 		}
 		catch
 		{
