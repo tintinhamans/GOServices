@@ -149,23 +149,33 @@ namespace GenOnlineService.Controllers
 			}
 
 			// accept WS
-			using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-
-			// attach; ownerSession must exist since CreateSession just created/reused it
-			UserSession? ownerSession = WebSocketManager.GetSessionFromUser(wsSess.m_UserID, wsSess.m_SessionType);
-			if (ownerSession == null)
+			WebSocket acceptedSocket;
+			try
 			{
-				await webSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, "Session lookup failed", CancellationToken.None);
+				acceptedSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+			}
+			catch
+			{
+				// nothing will ever activate this reservation now
+				await WebSocketManager.CancelPendingActivation(wsSess);
+				throw;
+			}
+
+			using var webSocket = acceptedSocket;
+
+			if (!await WebSocketManager.ActivateSession(wsSess, webSocket))
+			{
+				using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+				await webSocket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Connection superseded", closeCts.Token);
 				return;
 			}
-			wsSess.AttachWebsocket(webSocket);
 
 			var buffer = new byte[8192 * 4];
 			using var messageBuffer = new MemoryStream();
 			const int MaxMessageSizeBytes = 64 * 1024; // hard cap; a fragmented message larger than this closes the connection
 			WebSocketReceiveResult? receiveResult = null;
 
-			while (webSocket.State == WebSocketState.Open)
+			while (webSocket.State == WebSocketState.Open && WebSocketManager.IsCurrentWebSocket(wsSess))
 			{
 				bool bDisconnectTest = false;
 				if (bDisconnectTest)
@@ -182,6 +192,11 @@ namespace GenOnlineService.Controllers
 				}
 				catch (OperationCanceledException)
 				{
+					if (!WebSocketManager.IsCurrentWebSocket(wsSess))
+					{
+						break;
+					}
+
 					// No message received in 30s; send a keep-alive pong and continue waiting.
 					await wsSess.SendPong();
 					continue;
@@ -194,13 +209,17 @@ namespace GenOnlineService.Controllers
 					break;
 				}
 
+				if (!WebSocketManager.IsCurrentWebSocket(wsSess))
+				{
+					break;
+				}
+
 				// any inbound traffic proves the client is alive, not just an explicit PING
 				wsSess.OnPing();
 
 				if (receiveResult.MessageType == WebSocketMessageType.Close)
 				{
-					using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); // timeout
-					await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", cts.Token);
+					await wsSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing");
 					break;
 				}
 
@@ -209,7 +228,7 @@ namespace GenOnlineService.Controllers
 
 				if (messageBuffer.Length > MaxMessageSizeBytes)
 				{
-					await webSocket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message exceeds maximum allowed size", CancellationToken.None);
+					await wsSess.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message exceeds maximum allowed size");
 					break;
 				}
 
@@ -226,7 +245,7 @@ namespace GenOnlineService.Controllers
 				UserSession? sourceUserData = WebSocketManager.GetSessionFromUser(wsSess.m_UserID, wsSess.m_SessionType);
 
 				// if we lost session data, close WS
-				if (sourceUserData == null)
+				if (sourceUserData == null || !ReferenceEquals(sourceUserData, wsSess.OwnerSession))
 				{
 					await wsSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "User signed in from another point of presence [B]");
 					break;
@@ -267,75 +286,79 @@ namespace GenOnlineService.Controllers
 
 		private async Task ProcessWSMessage(UserWebSocketInstance sourceWS, UserSession sourceUserSession, WebSocketReceiveResult receiveResult, ArraySegment<byte> buffer)
 		{
-			SharedUserData? sourceUserData = WebSocketManager.GetSharedDataForUser(sourceUserSession.m_UserID);
-
-			// shared data can vanish if the session was cleaned up concurrently; nothing to process without it
-			if (sourceUserData == null)
+			if (!await sourceWS.TryBeginMessageProcessingAsync())
 			{
 				return;
 			}
-
-			// shared data can legitimately be gone (session torn down concurrently) - dereferencing it below would
-			// throw straight out of the receive loop and kill the connection
-			if (sourceUserData == null)
-			{
-				return;
-			}
-
-			if (receiveResult.MessageType == WebSocketMessageType.Close)
-			{
-				await WebSocketManager.DeleteSession(sourceWS.m_UserID, sourceUserSession.GetSessionType(), sourceWS, false);
-				return;
-			}
-
-			// we only process text or binary messages
-			if (receiveResult.MessageType != WebSocketMessageType.Text &&
-				receiveResult.MessageType != WebSocketMessageType.Binary)
-			{
-				return;
-			}
-
-			if (buffer.Array == null)
-			{
-				return;
-			}
-
-			WSMessageEnvelope envelope;
-			try
-			{
-				envelope = JsonSerializer.Deserialize<WSMessageEnvelope>(buffer.AsSpan(), JsonOpts);
-			}
-			catch
-			{
-				// malformed
-				return;
-			}
-
-			EWebSocketMessageID msgID = (EWebSocketMessageID)envelope.msg_id;
-
-			if (!s_messageHandlers.TryGetValue(msgID, out Func<WSContext, Task>? handler))
-			{
-				return;
-			}
-
-			WSContext ctx = new()
-			{
-				SourceWS = sourceWS,
-				SourceSession = sourceUserSession,
-				SourceUserData = sourceUserData,
-				Buffer = buffer,
-				LobbyManager = _lobbyManager,
-				DbFactory = _dbFactory
-			};
 
 			try
 			{
-				await handler(ctx);
+				if (!WebSocketManager.IsCurrentWebSocket(sourceWS))
+				{
+					return;
+				}
+
+				SharedUserData? sourceUserData = WebSocketManager.GetSharedDataForUser(sourceUserSession.m_UserID);
+
+				// shared data can vanish if the session was cleaned up concurrently; nothing to process without it
+				if (sourceUserData == null)
+				{
+					return;
+				}
+
+				// we only process text or binary messages
+				if (receiveResult.MessageType != WebSocketMessageType.Text &&
+					receiveResult.MessageType != WebSocketMessageType.Binary)
+				{
+					return;
+				}
+
+				if (buffer.Array == null)
+				{
+					return;
+				}
+
+				WSMessageEnvelope envelope;
+				try
+				{
+					envelope = JsonSerializer.Deserialize<WSMessageEnvelope>(buffer.AsSpan(), JsonOpts);
+				}
+				catch
+				{
+					// malformed
+					return;
+				}
+
+				EWebSocketMessageID msgID = (EWebSocketMessageID)envelope.msg_id;
+
+				if (!s_messageHandlers.TryGetValue(msgID, out Func<WSContext, Task>? handler))
+				{
+					return;
+				}
+
+				WSContext ctx = new()
+				{
+					SourceWS = sourceWS,
+					SourceSession = sourceUserSession,
+					SourceUserData = sourceUserData,
+					Buffer = buffer,
+					LobbyManager = _lobbyManager,
+					DbFactory = _dbFactory
+				};
+
+				try
+				{
+					await handler(ctx);
+				}
+				catch
+				{
+					// swallow per-message exceptions to avoid killing the loop
+					// you can add Sentry logging here if desired
+				}
 			}
-			catch
+			finally
 			{
-				// swallow per-message exceptions to avoid killing the loop
-				// you can add Sentry logging here if desired
+				sourceWS.EndMessageProcessing();
 			}
 		}
 	}

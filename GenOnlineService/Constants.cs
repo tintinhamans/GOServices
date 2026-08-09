@@ -31,6 +31,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using ZstdSharp.Unsafe;
 
@@ -193,176 +194,348 @@ namespace GenOnlineService
 	// TODO
 	static class WebSocketManager
 	{
+		private sealed class WebSocketLifecycleGate
+		{
+			public readonly SemaphoreSlim Semaphore = new(1, 1);
+			public int ReferenceCount;
+		}
+
+		private static readonly SemaphoreSlim m_websocketActivationLock = new(1, 1);
+		private static readonly ConcurrentDictionary<(EUserSessionType, Int64), WebSocketLifecycleGate> m_websocketLifecycleGates = new();
+		private static long m_nextWebsocketActivationId;
+
+		private static WebSocketLifecycleGate RetainLifecycleGate((EUserSessionType, Int64) key)
+		{
+			while (true)
+			{
+				WebSocketLifecycleGate gate = m_websocketLifecycleGates.GetOrAdd(key, _ => new WebSocketLifecycleGate());
+				lock (gate)
+				{
+					if (m_websocketLifecycleGates.TryGetValue(key, out WebSocketLifecycleGate? currentGate)
+						&& ReferenceEquals(currentGate, gate))
+					{
+						++gate.ReferenceCount;
+						return gate;
+					}
+				}
+			}
+		}
+
+		private static void ReleaseLifecycleGate((EUserSessionType, Int64) key, WebSocketLifecycleGate gate)
+		{
+			gate.Semaphore.Release();
+			lock (gate)
+			{
+				--gate.ReferenceCount;
+				if (gate.ReferenceCount == 0)
+				{
+					m_websocketLifecycleGates.TryRemove(
+						new KeyValuePair<(EUserSessionType, Int64), WebSocketLifecycleGate>(key, gate));
+				}
+			}
+		}
+
 		public static int g_PeakConnectionCount = 0;
 		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
-			string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
-
-			// if we have cache data, that means its a reconnect, noraml connections go through login flows which reset cache data
-			UserSession? userCacheData = WebSocketManager.GetSessionFromUser(ownerID, sessionType);
-			if (bIsReconnect)
+			var lifecycleKey = (sessionType, ownerID);
+			WebSocketLifecycleGate lifecycleGate = RetainLifecycleGate(lifecycleKey);
+			await lifecycleGate.Semaphore.WaitAsync();
+			bool bLifecycleLeaseTransferred = false;
+			bool bRestoreAbandonedOnFailure = false;
+			UserSession? userCacheData = null;
+			try
 			{
-				// this is a reconnect, re-use cache
-				Console.WriteLine("--> WEBSOCKET RECONNECT");
+				long activationId = Interlocked.Increment(ref m_nextWebsocketActivationId);
+				string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
 
-				// if its a reconnect, and we dont have cache OR shared data, its probably a server restart, so return null
-				if (userCacheData == null)
+				// if we have cache data, that means its a reconnect, noraml connections go through login flows which reset cache data
+				userCacheData = WebSocketManager.GetSessionFromUser(ownerID, sessionType);
+				if (bIsReconnect)
 				{
-					return null;
-				}
-				else
-				{
-					// depending on what our ref count was, we MAY need to recreate our shared data
-					if (m_dictSharedUserData.TryGetValue(ownerID, out SharedUserData? sharedData))
+					// this is a reconnect, re-use cache
+					Console.WriteLine("--> WEBSOCKET RECONNECT");
+
+					// if its a reconnect, and we dont have cache OR shared data, its probably a server restart, so return null
+					if (userCacheData == null)
 					{
-						// nothing to do here for shared user data, since the session was abandoned but not fully destroyed, it should still have user data
+						return null;
 					}
 					else
 					{
-						// get and cache social container
-						UserSocialContainer socialContainer = new();
-						socialContainer.Friends = await Database.Social.GetFriends(_db, ownerID);
-						socialContainer.PendingRequests = await Database.Social.GetPendingFriendsRequests(_db, ownerID);
-						socialContainer.Blocked = await Database.Social.GetBlocked(_db, ownerID);
+						bRestoreAbandonedOnFailure = userCacheData.IsMarkedAbandoned();
+						// depending on what our ref count was, we MAY need to recreate our shared data
+						if (m_dictSharedUserData.TryGetValue(ownerID, out SharedUserData? sharedData))
+						{
+							// nothing to do here for shared user data, since the session was abandoned but not fully destroyed, it should still have user data
+						}
+						else
+						{
+							// get and cache social container
+							UserSocialContainer socialContainer = new();
+							socialContainer.Friends = await Database.Social.GetFriends(_db, ownerID);
+							socialContainer.PendingRequests = await Database.Social.GetPendingFriendsRequests(_db, ownerID);
+							socialContainer.Blocked = await Database.Social.GetBlocked(_db, ownerID);
 
-						// get stats
-						PlayerStats GameStats = await Database.UserStats.GetPlayerStats(_db, ownerID);
+							// get stats
+							PlayerStats GameStats = await Database.UserStats.GetPlayerStats(_db, ownerID);
 
-						m_dictSharedUserData[ownerID] = new SharedUserData(ownerID, socialContainer, strDisplayName, bIsAdmin, GameStats);
+							m_dictSharedUserData[ownerID] = new SharedUserData(ownerID, socialContainer, strDisplayName, bIsAdmin, GameStats);
+						}
+
+						// clear abandoned flag
+						userCacheData.MarkNotAbandoned();
+
+						// NOTE: We intentionally do NOT call ClearPlayerIngameAbandon on reconnect.
+						// RecordPlayerIngameAbandon only stores the FIRST disconnect time.  Clearing
+						// it here was the root cause of the wrong-winner ELO bug:
+						//   A kills game → RecordPlayerIngameAbandon(A) set
+						//   A relaunches and reconnects → ClearPlayerIngameAbandon(A) wipes the record
+						//   Fallback uses TimeMemberLeft[A] (set much later) > IngameAbandon[B]
+						//   → A incorrectly wins
 					}
-
-					// clear abandoned flag
-					userCacheData.MarkNotAbandoned();
-
-					// NOTE: We intentionally do NOT call ClearPlayerIngameAbandon on reconnect.
-					// RecordPlayerIngameAbandon only stores the FIRST disconnect time.  Clearing
-					// it here was the root cause of the wrong-winner ELO bug:
-					//   A kills game → RecordPlayerIngameAbandon(A) set
-					//   A relaunches and reconnects → ClearPlayerIngameAbandon(A) wipes the record
-					//   Fallback uses TimeMemberLeft[A] (set much later) > IngameAbandon[B]
-					//   → A incorrectly wins
-				}
-			}
-			else
-			{
-				Console.WriteLine("--> WEBSOCKET CONNECT");
-
-				// how many other sessions do they have online?
-				bool bIsFirstSessionForUser = WebSocketManager.GetAllDataFromUser(ownerID).Count == 0;
-
-				// kill any existing sessions for this user of same session type
-				if (m_dictWebsockets[sessionType].TryGetValue(ownerID, out UserWebSocketInstance? existingSession))
-				{
-					Console.WriteLine("Killing existing session for {0} ({1})", ownerID, strDisplayName);
-					await DeleteSession(ownerID, sessionType, existingSession, !bIsReconnect);
-				}
-
-				// get and cache social container
-				UserSocialContainer socialContainer = new();
-				socialContainer.Friends = await Database.Social.GetFriends(_db, ownerID);
-				socialContainer.PendingRequests = await Database.Social.GetPendingFriendsRequests(_db, ownerID);
-				socialContainer.Blocked = await Database.Social.GetBlocked(_db, ownerID);
-
-				// get stats
-				PlayerStats GameStats = await Database.UserStats.GetPlayerStats(_db, ownerID);
-
-				userCacheData = new UserSession(ownerID, sessionType, client_id, strContinent, strCountry, dLatitude, dLongitude);
-				m_dictUserSessions[sessionType][ownerID] = userCacheData;
-				
-				// TODO_SOCIAL: Move this to a class
-				// inform any friends who are online that this person just came online (if they had no other sessions prior)
-				if (bIsFirstSessionForUser)
-				{
-					WebSocketMessage_Social_FriendStatusChanged friendStatusChangedEvent = new();
-					friendStatusChangedEvent.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED;
-					friendStatusChangedEvent.display_name = strDisplayName;
-					friendStatusChangedEvent.online = true;
-					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(friendStatusChangedEvent));
-
-					// friends are reciprocal so we can just iterate our friends
-					foreach (Int64 friendID in socialContainer.Friends)
-					{
-						WebsocketHelper.SendToAllSessionsOfUser(friendID, bytesJSON);
-					}
-				}
-
-				// TODO_EFCORE: check reconnect again, reconnect shouldnt increment ref count (nothing is done above)
-				// create or increment shared data
-				if (m_dictSharedUserData.TryGetValue(ownerID, out SharedUserData? sharedData))
-				{
-					// increment
-					sharedData.IncrementRefCount();
 				}
 				else
 				{
-					m_dictSharedUserData[ownerID] = new SharedUserData(ownerID, socialContainer, strDisplayName, bIsAdmin, GameStats);
-				}
-			}
+					Console.WriteLine("--> WEBSOCKET CONNECT");
 
-			// now create a websocket, we always do this whether its reconnect or not, only data is persistent
-			// NOTE: on the reconnect path the previous websocket may still be physically open (e.g. its receive loop
-			// is parked in a 30s ReceiveAsync). Overwriting the entry without closing it leaks a zombie connection
-			// that keeps running and sending on a socket nobody owns any more.
-			if (m_dictWebsockets[sessionType].TryRemove(ownerID, out UserWebSocketInstance? supersededSess) && supersededSess != null)
-			{
-				Console.WriteLine("Closing superseded websocket for {0} ({1})", ownerID, strDisplayName);
-				await supersededSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
-			}
+					// how many other sessions do they have online?
+					bool bIsFirstSessionForUser = WebSocketManager.GetAllDataFromUser(ownerID).Count == 0;
 
-			UserWebSocketInstance newSess = new UserWebSocketInstance(sessionType, ownerID);
-			m_dictWebsockets[sessionType][ownerID] = newSess;
-
-			// update last login and last ip
-			await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
-
-			// TODO_EFCORE: Optimize this, dont iterate all the time
-			int numSessions = WebSocketManager.GetNumberOfUsersOnline();
-
-			if (numSessions > g_PeakConnectionCount)
-			{
-				g_PeakConnectionCount = numSessions;
-			}
-
-			Console.Title = String.Format("GenOnline - {0} players", numSessions);
-
-			SharedUserData? sharedUserData = WebSocketManager.GetSharedDataForUser(ownerID);
-
-			// inform the user of any pending friends activities
-			{
-				int numOnline = 0;
-				int numPending = sharedUserData.GetSocialContainer().PendingRequests.Count;
-
-				foreach (Int64 friendID in sharedUserData.GetSocialContainer().Friends)
-				{
-					if (WebSocketManager.GetSessionFromUser(friendID, sessionType) != null)
+					// kill any existing sessions for this user of same session type
+					if (m_dictWebsockets[sessionType].TryGetValue(ownerID, out UserWebSocketInstance? existingSession))
 					{
-						++numOnline;
+						Console.WriteLine("Killing existing session for {0} ({1})", ownerID, strDisplayName);
+						await DeleteSession(ownerID, sessionType, existingSession, !bIsReconnect, true);
+					}
+
+					// get and cache social container
+					UserSocialContainer socialContainer = new();
+					socialContainer.Friends = await Database.Social.GetFriends(_db, ownerID);
+					socialContainer.PendingRequests = await Database.Social.GetPendingFriendsRequests(_db, ownerID);
+					socialContainer.Blocked = await Database.Social.GetBlocked(_db, ownerID);
+
+					// get stats
+					PlayerStats GameStats = await Database.UserStats.GetPlayerStats(_db, ownerID);
+
+					userCacheData = new UserSession(ownerID, sessionType, client_id, strContinent, strCountry, dLatitude, dLongitude);
+					m_dictUserSessions[sessionType][ownerID] = userCacheData;
+
+					// TODO_SOCIAL: Move this to a class
+					// inform any friends who are online that this person just came online (if they had no other sessions prior)
+					if (bIsFirstSessionForUser)
+					{
+						WebSocketMessage_Social_FriendStatusChanged friendStatusChangedEvent = new();
+						friendStatusChangedEvent.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED;
+						friendStatusChangedEvent.display_name = strDisplayName;
+						friendStatusChangedEvent.online = true;
+						byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(friendStatusChangedEvent));
+
+						// friends are reciprocal so we can just iterate our friends
+						foreach (Int64 friendID in socialContainer.Friends)
+						{
+							WebsocketHelper.SendToAllSessionsOfUser(friendID, bytesJSON);
+						}
+					}
+
+					// TODO_EFCORE: check reconnect again, reconnect shouldnt increment ref count (nothing is done above)
+					// create or increment shared data
+					if (m_dictSharedUserData.TryGetValue(ownerID, out SharedUserData? sharedData))
+					{
+						// increment
+						sharedData.IncrementRefCount();
+					}
+					else
+					{
+						m_dictSharedUserData[ownerID] = new SharedUserData(ownerID, socialContainer, strDisplayName, bIsAdmin, GameStats);
 					}
 				}
 
-				if (numOnline > 0 || numPending > 0)
+				// update last login and last ip
+				await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
+
+				// TODO_EFCORE: Optimize this, dont iterate all the time
+				int numSessions = WebSocketManager.GetNumberOfUsersOnline();
+
+				if (numSessions > g_PeakConnectionCount)
 				{
-					WebSocketMessage_FriendsOverallStatusUpdate outboundMsg = new WebSocketMessage_FriendsOverallStatusUpdate();
-					outboundMsg.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIENDS_OVERALL_STATUS_UPDATE;
-					outboundMsg.num_online = numOnline;
-					outboundMsg.num_pending = numPending;
-					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
-					await newSess.SendAsync(bytesJSON, WebSocketMessageType.Text);
+					g_PeakConnectionCount = numSessions;
+				}
+
+				Console.Title = String.Format("GenOnline - {0} players", numSessions);
+
+				SharedUserData? sharedUserData = WebSocketManager.GetSharedDataForUser(ownerID);
+
+				// inform the user of any pending friends activities
+				{
+					int numOnline = 0;
+					int numPending = sharedUserData.GetSocialContainer().PendingRequests.Count;
+
+					foreach (Int64 friendID in sharedUserData.GetSocialContainer().Friends)
+					{
+						if (WebSocketManager.GetSessionFromUser(friendID, sessionType) != null)
+						{
+							++numOnline;
+						}
+					}
+
+					if (numOnline > 0 || numPending > 0)
+					{
+						WebSocketMessage_FriendsOverallStatusUpdate outboundMsg = new WebSocketMessage_FriendsOverallStatusUpdate();
+						outboundMsg.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIENDS_OVERALL_STATUS_UPDATE;
+						outboundMsg.num_online = numOnline;
+						outboundMsg.num_pending = numPending;
+						byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
+						userCacheData.QueueWebsocketSend(bytesJSON);
+					}
+				}
+
+				UserWebSocketInstance newSession = new UserWebSocketInstance(
+					sessionType,
+					ownerID,
+					userCacheData,
+					activationId,
+					!bIsReconnect,
+					bRestoreAbandonedOnFailure);
+				newSession.SetLifecycleLease(() => ReleaseLifecycleGate(lifecycleKey, lifecycleGate));
+				bLifecycleLeaseTransferred = true;
+				m_pendingWebsocketActivations.AddOrUpdate(
+					(sessionType, ownerID),
+					newSession,
+					(_, pendingSession) => pendingSession.ActivationId > activationId ? pendingSession : newSession);
+				return newSession;
+			}
+			finally
+			{
+				if (!bLifecycleLeaseTransferred)
+				{
+					if (userCacheData != null
+						&& IsCurrentUserSession(userCacheData)
+						&& (!bIsReconnect || bRestoreAbandonedOnFailure))
+					{
+						userCacheData.MarkAbandoned();
+					}
+
+					ReleaseLifecycleGate(lifecycleKey, lifecycleGate);
 				}
 			}
-
-			return newSess;
 		}
 
-		public static async Task Tick()
+		public static async Task<bool> ActivateSession(UserWebSocketInstance newSession, WebSocket socket)
 		{
-			// Give the entire tick a 20 ms deadline. All users drain concurrently via
-			// Task.WhenAll, so a slow/stuck client cannot delay others. If the deadline
-			// fires, the CancellationToken propagates into each in-flight SendAsync and
-			// into the dequeue loop guard, so the stuck user is skipped and their unsent
-			// messages stay in the queue for the next tick.
-			using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
-			await Task.WhenAll(m_dictUserSessions.Values.SelectMany(inner => inner.Values).Select(sess => sess.TickWebsocket(cts.Token)));
+			UserWebSocketInstance? supersededSession = null;
+			bool bActivated = false;
+			try
+			{
+				await m_websocketActivationLock.WaitAsync();
+				try
+				{
+					var activationKey = (newSession.m_SessionType, newSession.m_UserID);
+					if (!m_pendingWebsocketActivations.TryGetValue(activationKey, out UserWebSocketInstance? pendingSession)
+						|| !ReferenceEquals(pendingSession, newSession)
+						|| !IsCurrentUserSession(newSession.OwnerSession))
+					{
+						return false;
+					}
+
+					ConcurrentDictionary<Int64, UserWebSocketInstance> sessions = m_dictWebsockets[newSession.m_SessionType];
+					if (sessions.TryGetValue(newSession.m_UserID, out supersededSession))
+					{
+						supersededSession.MarkSuperseded();
+					}
+				}
+				finally
+				{
+					m_websocketActivationLock.Release();
+				}
+
+				if (supersededSession != null)
+				{
+					await supersededSession.WaitForMessageProcessingToDrainAsync();
+					await supersededSession.StopSendPumpAsync();
+				}
+
+				await m_websocketActivationLock.WaitAsync();
+				try
+				{
+					var activationKey = (newSession.m_SessionType, newSession.m_UserID);
+					newSession.AttachWebsocket(socket);
+					m_dictWebsockets[newSession.m_SessionType][newSession.m_UserID] = newSession;
+					m_pendingWebsocketActivations.TryRemove(
+						new KeyValuePair<(EUserSessionType, Int64), UserWebSocketInstance>(activationKey, newSession));
+					bActivated = true;
+				}
+				finally
+				{
+					m_websocketActivationLock.Release();
+				}
+			}
+			finally
+			{
+				if (!bActivated)
+				{
+					m_pendingWebsocketActivations.TryRemove(
+						new KeyValuePair<(EUserSessionType, Int64), UserWebSocketInstance>(
+							(newSession.m_SessionType, newSession.m_UserID), newSession));
+					RestoreSessionAfterFailedActivation(newSession);
+				}
+
+				newSession.ReleaseLifecycleLease();
+			}
+
+			if (supersededSession != null)
+			{
+				await supersededSession.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Connection superseded");
+			}
+
+			return true;
+		}
+
+		// Drops the reservation only while it still belongs to this instance, so a handshake that
+		// never reaches ActivateSession (aborted accept, client vanished) doesn't strand an entry.
+		public static Task CancelPendingActivation(UserWebSocketInstance? session)
+		{
+			if (session == null)
+			{
+				return Task.CompletedTask;
+			}
+
+			bool bRemovedReservation = m_pendingWebsocketActivations.TryRemove(
+				new KeyValuePair<(EUserSessionType, Int64), UserWebSocketInstance>(
+					(session.m_SessionType, session.m_UserID), session));
+			if (bRemovedReservation)
+			{
+				RestoreSessionAfterFailedActivation(session);
+			}
+
+			session.ReleaseLifecycleLease();
+			return Task.CompletedTask;
+		}
+
+		private static bool IsCurrentUserSession(UserSession session)
+		{
+			return m_dictUserSessions[session.GetSessionType()].TryGetValue(session.m_UserID, out UserSession? currentSession)
+				&& ReferenceEquals(currentSession, session);
+		}
+
+		private static void RestoreSessionAfterFailedActivation(UserWebSocketInstance session)
+		{
+			if (!IsCurrentUserSession(session.OwnerSession))
+			{
+				return;
+			}
+
+			if (session.CreatedFreshSession || session.RestoreAbandonedOnFailure)
+			{
+				session.OwnerSession.MarkAbandoned();
+			}
+		}
+
+		public static bool IsCurrentWebSocket(UserWebSocketInstance session)
+		{
+			return !session.IsSuperseded
+				&& m_dictWebsockets[session.m_SessionType].TryGetValue(session.m_UserID, out UserWebSocketInstance? currentSession)
+				&& ReferenceEquals(currentSession, session);
 		}
 
 		public static int GetNumberOfUsersOnline()
@@ -427,118 +600,139 @@ namespace GenOnlineService
 			}
 		}
 
-		public static async Task DeleteSession(Int64 user_id, EUserSessionType sessionType, UserWebSocketInstance? oldWS, bool bShouldInvalidatePlayerCacheToBlockReconnect)
+		public static async Task DeleteSession(
+			Int64 user_id,
+			EUserSessionType sessionType,
+			UserWebSocketInstance? oldWS,
+			bool bShouldInvalidatePlayerCacheToBlockReconnect,
+			bool bLifecycleLeaseAlreadyHeld = false)
 		{
-			UserSession? sourceData = WebSocketManager.GetSessionFromUser(user_id, sessionType);
-			SharedUserData? sourceSharedData = WebSocketManager.GetSharedDataForUser(user_id);
-
-			bool bIsStaleSocket = false;
-
-			if (oldWS != null)
+			var lifecycleKey = (sessionType, user_id);
+			WebSocketLifecycleGate? lifecycleGate = null;
+			if (!bLifecycleLeaseAlreadyHeld)
 			{
-				// has this websocket already been superseded by a newer connection for the same user? if so it is a
-				// stale/zombie socket and must not be allowed to abandon or tear down the live session
-				if (m_dictWebsockets[sessionType].TryGetValue(user_id, out UserWebSocketInstance? currentWS))
-				{
-					bIsStaleSocket = !ReferenceEquals(currentWS, oldWS);
-				}
-
-				try
-				{
-					// dont remove by ID, user could have re-opened another websocket open via reconnection, remove by instance, if its not there, thats OK, it was already closed and the new instance is a reconnect
-					var item = m_dictWebsockets[sessionType].First(kvp => kvp.Value == oldWS); // safe to lookup by sessionType here since we only ever remove old WS of the same type
-					m_dictWebsockets[sessionType].Remove(item.Key, out UserWebSocketInstance? destroyedSess);
-
-					if (destroyedSess != null)
-					{
-						await destroyedSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "User signed in from another point of presence [A]");
-					}
-				}
-				catch
-				{
-
-				}
-
-				if (bIsStaleSocket)
-				{
-					// nothing else to do - the user is still connected on the newer socket
-					await oldWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
-					return;
-				}
+				lifecycleGate = RetainLifecycleGate(lifecycleKey);
+				await lifecycleGate.Semaphore.WaitAsync();
 			}
 
-			if (bShouldInvalidatePlayerCacheToBlockReconnect)
+			try
 			{
-				// NOTE: ClearDataFromUser owns the shared data ref count decrement (and GC) for this path - doing it
-				// again here would drop the count twice for a single disconnect and tear down the shared data while
-				// the user still has other live sessions
-				await WebSocketManager.ClearDataFromUser(user_id, sessionType);
-			}
-			else
-			{
-				// mark it as abandoned for now to start the expiration timer
-				if (sourceData != null)
+				bool bRemovedCurrentSocket = oldWS == null;
+				if (oldWS != null)
 				{
-					sourceData.MarkAbandoned();
-
-					// If the player was in an active game when their connection dropped, record the
-					// abandon time NOW (before any lobby-structure cleanup runs).  This timestamp is
-					// the authoritative "who quit first" signal used by DetermineLobbyWinnerIfNotPresent,
-					// and must be captured here rather than in RemoveMember, because RemoveMember may
-					// execute much later (e.g. 30 s after the first abandonment) or at an unexpected
-					// time (e.g. when the other player reconnects with a fresh session and their old
-					// session is forcibly evicted, causing them to appear as "last to leave" even
-					// though they stayed in the game longer than the opponent who quit first).
+					await m_websocketActivationLock.WaitAsync();
 					try
 					{
-						var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-						if (sourceData.currentLobbyID != -1)
+						ConcurrentDictionary<Int64, UserWebSocketInstance> sessions = m_dictWebsockets[sessionType];
+						if (!oldWS.IsSuperseded
+							&& sessions.TryGetValue(user_id, out UserWebSocketInstance? currentSession)
+							&& ReferenceEquals(currentSession, oldWS))
 						{
-							Lobby? ingameLobby = lobbyManager.GetLobby(sourceData.currentLobbyID);
-							if (ingameLobby != null && ingameLobby.State == ELobbyState.INGAME)
+							oldWS.MarkSuperseded();
+							bRemovedCurrentSocket = sessions.TryRemove(
+								new KeyValuePair<Int64, UserWebSocketInstance>(user_id, oldWS));
+						}
+					}
+					finally
+					{
+						m_websocketActivationLock.Release();
+					}
+
+					await oldWS.WaitForMessageProcessingToDrainAsync();
+					await oldWS.StopSendPumpAsync();
+					if (!bRemovedCurrentSocket)
+					{
+						if (lifecycleGate != null)
+						{
+							ReleaseLifecycleGate(lifecycleKey, lifecycleGate);
+							lifecycleGate = null;
+						}
+
+						await oldWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stale session being deleted");
+						return;
+					}
+				}
+
+				UserSession? sourceData = WebSocketManager.GetSessionFromUser(user_id, sessionType);
+				SharedUserData? sourceSharedData = WebSocketManager.GetSharedDataForUser(user_id);
+
+				if (bShouldInvalidatePlayerCacheToBlockReconnect)
+				{
+					await WebSocketManager.ClearDataFromUser(user_id, sessionType);
+				}
+				else
+				{
+					// mark it as abandoned for now to start the expiration timer
+					if (sourceData != null)
+					{
+						sourceData.MarkAbandoned();
+
+						// If the player was in an active game when their connection dropped, record the
+						// abandon time NOW (before any lobby-structure cleanup runs).  This timestamp is
+						// the authoritative "who quit first" signal used by DetermineLobbyWinnerIfNotPresent,
+						// and must be captured here rather than in RemoveMember, because RemoveMember may
+						// execute much later (e.g. 30 s after the first abandonment) or at an unexpected
+						// time (e.g. when the other player reconnects with a fresh session and their old
+						// session is forcibly evicted, causing them to appear as "last to leave" even
+						// though they stayed in the game longer than the opponent who quit first).
+						try
+						{
+							var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
+							if (sourceData.currentLobbyID != -1)
 							{
-								ingameLobby.RecordPlayerIngameAbandon(user_id);
+								Lobby? ingameLobby = lobbyManager.GetLobby(sourceData.currentLobbyID);
+								if (ingameLobby != null && ingameLobby.State == ELobbyState.INGAME)
+								{
+									ingameLobby.RecordPlayerIngameAbandon(user_id);
+								}
+								else
+								{
+									Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — lobby={sourceData.currentLobbyID} found={ingameLobby != null} state={ingameLobby?.State}");
+								}
 							}
 							else
 							{
-								Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — lobby={sourceData.currentLobbyID} found={ingameLobby != null} state={ingameLobby?.State}");
+								Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — currentLobbyID==-1 (session has no lobby)");
 							}
 						}
-						else
+						catch (Exception ex)
 						{
-							Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — currentLobbyID==-1 (session has no lobby)");
+							Console.WriteLine($"[WARN] Failed to record in-game abandon for user {user_id}: {ex.Message}");
 						}
 					}
-					catch (Exception ex)
-					{
-						Console.WriteLine($"[WARN] Failed to record in-game abandon for user {user_id}: {ex.Message}");
-					}
 				}
-			}
 
-			// NOTE: They only went offline if ref count became 0, otherwise they're still online somewhere else
-			if (sourceData != null && sourceSharedData != null && sourceSharedData.NeedsGC())
-			{
-				// TODO_SOCIAL: Move this to a class
-				// inform any friends who are online that this person just came online
-				WebSocketMessage_Social_FriendStatusChanged friendStatusChangedEvent = new();
-				friendStatusChangedEvent.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED;
-				friendStatusChangedEvent.display_name = sourceSharedData.m_strDisplayName;
-				friendStatusChangedEvent.online = false;
-				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(friendStatusChangedEvent));
-
-				if (sourceData != null)
+				// NOTE: They only went offline if ref count became 0, otherwise they're still online somewhere else
+				if (sourceData != null && sourceSharedData != null && sourceSharedData.NeedsGC())
 				{
-					// friends are reciprocal so we can just iterate our friends
-					foreach (Int64 friendID in sourceSharedData.GetSocialContainer().Friends)
+					// TODO_SOCIAL: Move this to a class
+					// inform any friends who are online that this person just came online
+					WebSocketMessage_Social_FriendStatusChanged friendStatusChangedEvent = new();
+					friendStatusChangedEvent.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED;
+					friendStatusChangedEvent.display_name = sourceSharedData.m_strDisplayName;
+					friendStatusChangedEvent.online = false;
+					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(friendStatusChangedEvent));
+
+					if (sourceData != null)
 					{
-						WebsocketHelper.SendToAllSessionsOfUser(friendID, bytesJSON);
+						// friends are reciprocal so we can just iterate our friends
+						foreach (Int64 friendID in sourceSharedData.GetSocialContainer().Friends)
+						{
+							WebsocketHelper.SendToAllSessionsOfUser(friendID, bytesJSON);
+						}
 					}
 				}
-			}
 
-			int numSessions = WebSocketManager.GetNumberOfUsersOnline(); ;
-			Console.Title = String.Format("GenOnline - {0} players", numSessions);
+				int numSessions = WebSocketManager.GetNumberOfUsersOnline(); ;
+				Console.Title = String.Format("GenOnline - {0} players", numSessions);
+			}
+			finally
+			{
+				if (lifecycleGate != null)
+				{
+					ReleaseLifecycleGate(lifecycleKey, lifecycleGate);
+				}
+			}
 
 			try
 			{
@@ -589,6 +783,7 @@ namespace GenOnlineService
 			[EUserSessionType.GameLauncher] = new(),
 			[EUserSessionType.ChatClient] = new(),
 		};
+		private static readonly ConcurrentDictionary<(EUserSessionType, Int64), UserWebSocketInstance> m_pendingWebsocketActivations = new();
 
 		private static ConcurrentDictionary<EUserSessionType, ConcurrentDictionary<Int64, UserSession>> m_dictUserSessions = new()
 		{
@@ -958,11 +1153,15 @@ namespace GenOnlineService
 
 		public void MarkAbandoned()
 		{
-			m_timeAbandoned = Environment.TickCount64;
+			Volatile.Write(ref m_timeAbandoned, Environment.TickCount64);
 		}
 		public void MarkNotAbandoned()
 		{
-			m_timeAbandoned = -1;
+			Volatile.Write(ref m_timeAbandoned, -1);
+		}
+		public bool IsMarkedAbandoned()
+		{
+			return Volatile.Read(ref m_timeAbandoned) != -1;
 		}
 
 		public bool IsAbandoned()
@@ -970,6 +1169,20 @@ namespace GenOnlineService
 			UserWebSocketInstance websocketForUser = WebSocketManager.GetWebSocketForSession(this);
 			return m_timeAbandoned != -1 && websocketForUser == null;
 		}
+
+		// Buffered here (not on UserWebSocketInstance) so pending sends survive a reconnect.
+		// The bounded queue rejects new writes when full so accepted protocol messages are
+		// never silently evicted; the stalled connection is closed to force resynchronization.
+		// Whichever UserWebSocketInstance is currently attached owns the pump that drains this.
+		private readonly Channel<byte[]> m_sendChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(500)
+		{
+			FullMode = BoundedChannelFullMode.Wait,
+			SingleReader = true,
+			SingleWriter = false
+		});
+		private int m_sendQueueOverflowed;
+
+		internal ChannelReader<byte[]> SendChannelReader => m_sendChannel.Reader;
 
 		// TODO_EFCORE: check all uses of QueueWebsocketSend, some might need to be SendToAllInstances
 		public void QueueWebsocketSend(byte[] bytesJSON)
@@ -979,9 +1192,31 @@ namespace GenOnlineService
 				return;
 			}
 
-			// Always enqueue; the TickWebsocket drain loop is the sole sender,
-			// ensuring WebSocket.SendAsync is never called concurrently.
-			m_lstPendingWebsocketSends.Enqueue(bytesJSON);
+			if (m_sendChannel.Writer.TryWrite(bytesJSON))
+			{
+				return;
+			}
+
+			if (Interlocked.Exchange(ref m_sendQueueOverflowed, 1) == 0)
+			{
+				Console.WriteLine($"[WARN] Closing stalled WebSocket for user {m_UserID}: outbound queue is full");
+				_ = CloseStalledWebsocket();
+			}
+		}
+
+		// Detached from the queueing caller, so failures must be observed here rather than
+		// surfacing later as an unobserved task exception.
+		private async Task CloseStalledWebsocket()
+		{
+			try
+			{
+				await CloseWebsocket(WebSocketCloseStatus.PolicyViolation, "Outbound message queue exceeded capacity");
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine($"[WARN] Failed to close stalled WebSocket for user {m_UserID}: {ex.Message}");
+				SentrySdk.CaptureException(ex);
+			}
 		}
 
 		public async Task<UserWebSocketInstance> CloseWebsocket(WebSocketCloseStatus reason, string strReason)
@@ -995,30 +1230,10 @@ namespace GenOnlineService
 			return websocketForUser;
 		}
 
-		public async Task TickWebsocket(CancellationToken tickToken = default)
-		{
-			// Do we have a connection to send on?
-			UserWebSocketInstance websocketForUser = WebSocketManager.GetWebSocketForSession(this);
-			if (websocketForUser != null)
-			{
-				const int maxMessagesSendPerFrame = 50;
-				int messagesSent = 0;
-				// start dequeing and sending
-				while (!tickToken.IsCancellationRequested && messagesSent < maxMessagesSendPerFrame && m_lstPendingWebsocketSends.TryDequeue(out byte[] packetData))
-				{
-					await websocketForUser.SendAsync(packetData, WebSocketMessageType.Text, tickToken);
-					++messagesSent;
-				}
-			}
-		}
-		
-		// TODO_CACHE: Size limit this?
-		ConcurrentQueue<byte[]> m_lstPendingWebsocketSends = new ConcurrentQueue<byte[]>();
-
 		public bool NeedsCleanup()
 		{
-			const Int64 timeBeforeConsideredAbandoned = 30000; // 5 minutes
-			return Environment.TickCount64 - m_timeAbandoned >= timeBeforeConsideredAbandoned;
+			const Int64 timeBeforeConsideredAbandoned = 30000; // 30 seconds
+			return Environment.TickCount64 - Volatile.Read(ref m_timeAbandoned) >= timeBeforeConsideredAbandoned;
 		}
 
 		private bool m_bSubscribedToRealtimeSocialupdates = false;
@@ -1152,7 +1367,7 @@ namespace GenOnlineService
 		
 
 		// TODO: Start using nullable for int values etc instead of doing 0 or -1
-        public async Task SendPong()
+		public Task SendPong()
 		{
 			OnPing();
 
@@ -1160,21 +1375,153 @@ namespace GenOnlineService
 			WebSocketMessage_PONG outboundMsg = new WebSocketMessage_PONG();
 			outboundMsg.msg_id = (int)EWebSocketMessageID.PONG;
 			byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
-			await SendAsync(bytesJSON, WebSocketMessageType.Text);
+			OwnerSession.QueueWebsocketSend(bytesJSON);
+			return Task.CompletedTask;
 		}
 		
 
 		private WebSocket? m_SockInternal = null;
 
-		public UserWebSocketInstance(EUserSessionType sessionType, Int64 ownerID) : base()
+		private CancellationTokenSource? m_sendPumpCts;
+		private Task? m_sendPumpTask;
+		private readonly object m_sendPumpLock = new();
+		private readonly SemaphoreSlim m_messageProcessingLock = new(1, 1);
+		private Action? m_releaseLifecycleLease;
+		private int m_bSuperseded;
+
+		public long ActivationId { get; }
+		internal UserSession OwnerSession { get; }
+		internal bool CreatedFreshSession { get; }
+		internal bool RestoreAbandonedOnFailure { get; }
+		internal bool IsSuperseded => Volatile.Read(ref m_bSuperseded) != 0;
+
+		public UserWebSocketInstance(
+			EUserSessionType sessionType,
+			Int64 ownerID,
+			UserSession ownerSession,
+			long activationId,
+			bool createdFreshSession,
+			bool restoreAbandonedOnFailure) : base()
 		{
 			m_SessionType = sessionType;
 			m_UserID = ownerID;
+			ActivationId = activationId;
+			OwnerSession = ownerSession;
+			CreatedFreshSession = createdFreshSession;
+			RestoreAbandonedOnFailure = restoreAbandonedOnFailure;
+		}
+
+		internal void SetLifecycleLease(Action releaseLifecycleLease)
+		{
+			m_releaseLifecycleLease = releaseLifecycleLease;
+		}
+
+		internal void ReleaseLifecycleLease()
+		{
+			Interlocked.Exchange(ref m_releaseLifecycleLease, null)?.Invoke();
+		}
+
+		internal void MarkSuperseded()
+		{
+			Interlocked.Exchange(ref m_bSuperseded, 1);
+		}
+
+		internal async Task<bool> TryBeginMessageProcessingAsync()
+		{
+			await m_messageProcessingLock.WaitAsync();
+			if (IsSuperseded)
+			{
+				m_messageProcessingLock.Release();
+				return false;
+			}
+
+			return true;
+		}
+
+		internal void EndMessageProcessing()
+		{
+			m_messageProcessingLock.Release();
+		}
+
+		internal async Task WaitForMessageProcessingToDrainAsync()
+		{
+			await m_messageProcessingLock.WaitAsync();
+			m_messageProcessingLock.Release();
 		}
 
 		public void AttachWebsocket(WebSocket sock)
 		{
 			m_SockInternal = sock;
+			StartSendPump(OwnerSession);
+		}
+
+		// drains the owning session's send channel for as long as this connection is attached;
+		// event-driven (no polling), and naturally serializes sends against this socket
+		private void StartSendPump(UserSession ownerSession)
+		{
+			CancellationTokenSource cts = new CancellationTokenSource();
+			CancellationToken pumpToken = cts.Token;
+
+			Task pumpTask = Task.Run(async () =>
+			{
+				try
+				{
+					await foreach (byte[] packetData in ownerSession.SendChannelReader.ReadAllAsync(pumpToken))
+					{
+						// Pump cancellation stops the next channel read, not the active send. This
+						// avoids consuming a packet and then dropping it during reconnect handoff.
+						await SendAsync(packetData, WebSocketMessageType.Text);
+					}
+				}
+				catch (OperationCanceledException)
+				{
+					// pump stopped because this connection detached/closed; any buffered items
+					// remain in the channel for the next connection's pump to pick up
+				}
+				finally
+				{
+					// disposed here, not in StopSendPump, so the token stays valid for all in-flight use
+					cts.Dispose();
+				}
+			});
+
+			lock (m_sendPumpLock)
+			{
+				m_sendPumpCts = cts;
+				m_sendPumpTask = pumpTask;
+			}
+		}
+
+		public async Task StopSendPumpAsync()
+		{
+			CancellationTokenSource? cts;
+			Task? pumpTask;
+			lock (m_sendPumpLock)
+			{
+				cts = m_sendPumpCts;
+				pumpTask = m_sendPumpTask;
+				m_sendPumpCts = null;
+				m_sendPumpTask = null;
+			}
+
+			try
+			{
+				cts?.Cancel();
+			}
+			catch (ObjectDisposedException)
+			{
+			}
+
+			if (pumpTask != null)
+			{
+				try
+				{
+					await pumpTask;
+				}
+				catch (OperationCanceledException)
+				{
+				}
+			}
 		}
 
 		public void OnPing()
@@ -1269,6 +1616,8 @@ namespace GenOnlineService
 
 		public async Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription)
 		{
+			await StopSendPumpAsync();
+
 			if (m_SockInternal != null)
 			{
 				try
