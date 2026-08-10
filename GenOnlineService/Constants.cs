@@ -2545,7 +2545,9 @@ namespace GenOnlineService
 		AC_REGISTER_PLAYER = 40,
 		AC_DEREGISTER_PLAYER = 41,
 		WS_KEEPALIVE = 42,
-		WS_KEEPALIVE_CLIENT = 43
+		WS_KEEPALIVE_CLIENT = 43,
+		MATCHMAKING_ACTION_REQUEUE = 44,
+		MATCHMAKING_ACTION_SETUP_PROGRESS = 45
 	};
 
 	public static class UserPresence
@@ -2653,8 +2655,16 @@ namespace GenOnlineService
 		public string name { get; set; } = String.Empty;
 	}
 
+	public class WebSocketMessage_FullMeshConnectivityCheckRequest : WebSocketMessage
+	{
+		public Int64 mesh_check_id { get; set; }
+		public int attempt { get; set; }
+	}
+
 	public class WebSocketMessage_FullMeshConnectivityCheckResponseFromUser : WebSocketMessage
 	{
+		public Int64 mesh_check_id { get; set; }
+		public int attempt { get; set; }
 		public List<Int64> connectivity_map { get; set; } = new();
 	}
 
@@ -2827,6 +2837,11 @@ namespace GenOnlineService
 	public class WebSocketMessage_MatchmakerStartGame : WebSocketMessage
 	{
 
+	}
+
+	public class WebSocketMessage_MatchmakerSetupProgress : WebSocketMessage
+	{
+		public int timeout_ms { get; set; }
 	}
 
 }
