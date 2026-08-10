@@ -31,6 +31,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using ZstdSharp.Unsafe;
 
@@ -102,16 +103,215 @@ namespace GenOnlineService
 		COMPLETE
 	}
 
+	[Flags]
 	public enum ERoomFlags : int
 	{
-		ROOM_FLAGS_DEFAULT = 0,
-		ROOM_FLAGS_SHOW_ALL_MATCHES = 1
+		ROOM_FLAGS_NONE = 0,
+		ROOM_FLAGS_SHOW_ALL_MATCHES = 1 << 0
 	}
 	public class RoomData
 	{
 		public int id { get; set; } = -1;
 		public string name { get; set; } = "";
-		public ERoomFlags flags { get; set; } = ERoomFlags.ROOM_FLAGS_DEFAULT;
+		public int? parent_id { get; set; } = null;
+		public int? target_room_id { get; set; } = null;
+		public ERoomFlags flags { get; set; } = ERoomFlags.ROOM_FLAGS_NONE;
+	}
+
+	internal sealed class RoomCatalogData
+	{
+		public required IReadOnlyList<RoomData> Rooms { get; init; }
+		public required IReadOnlyDictionary<int, RoomData> RoomsByID { get; init; }
+		public required IReadOnlyDictionary<int, HashSet<int>> DescendantRoomIDs { get; init; }
+
+		public bool TryResolveTargetRoomID(int selectedRoomID, out Int16 targetRoomID)
+		{
+			if (selectedRoomID == -1)
+			{
+				targetRoomID = -1;
+				return true;
+			}
+
+			if (!RoomsByID.TryGetValue(selectedRoomID, out RoomData? room))
+			{
+				targetRoomID = -1;
+				return false;
+			}
+
+			targetRoomID = checked((Int16)(room.target_room_id ?? room.id));
+			return true;
+		}
+
+		public bool CanViewLobby(int selectedRoomID, int lobbyRoomID)
+		{
+			if (!RoomsByID.ContainsKey(selectedRoomID) || !RoomsByID.ContainsKey(lobbyRoomID))
+			{
+				return false;
+			}
+
+			return selectedRoomID == lobbyRoomID
+				|| (DescendantRoomIDs.TryGetValue(selectedRoomID, out HashSet<int>? descendants)
+					&& descendants.Contains(lobbyRoomID));
+		}
+	}
+
+	public static class RoomCatalog
+	{
+		private static RoomCatalogData? s_catalog;
+
+		public static IReadOnlyList<RoomData> Rooms => Current.Rooms;
+		private static RoomCatalogData Current => s_catalog
+			?? throw new InvalidOperationException("The room catalog has not been initialized.");
+
+		public static void Initialize(string catalogPath)
+		{
+			try
+			{
+				s_catalog = CreateFromJson(File.ReadAllText(catalogPath), catalogPath);
+			}
+			catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+			{
+				throw new InvalidDataException($"Failed to load room catalog '{catalogPath}': {ex.Message}", ex);
+			}
+		}
+
+		public static bool TryResolveTargetRoomID(int selectedRoomID, out Int16 targetRoomID)
+		{
+			return Current.TryResolveTargetRoomID(selectedRoomID, out targetRoomID);
+		}
+
+		public static bool CanViewLobby(int selectedRoomID, int lobbyRoomID)
+		{
+			return Current.CanViewLobby(selectedRoomID, lobbyRoomID);
+		}
+
+		private static RoomCatalogData CreateFromJson(string json, string sourceName = "rooms.json")
+		{
+			List<RoomData> rooms;
+			try
+			{
+				rooms = JsonSerializer.Deserialize<List<RoomData>>(json, new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				}) ?? throw new InvalidDataException("The room catalog must contain a JSON array.");
+			}
+			catch (JsonException ex)
+			{
+				throw new InvalidDataException($"Room catalog '{sourceName}' contains invalid JSON: {ex.Message}", ex);
+			}
+
+			if (rooms.Count == 0)
+			{
+				throw new InvalidDataException("The room catalog must contain at least one room.");
+			}
+
+			Dictionary<int, RoomData> roomsByID = new();
+			foreach (RoomData room in rooms)
+			{
+				ValidateConfiguredID(room.id, $"Room ID {room.id}");
+				if (!roomsByID.TryAdd(room.id, room))
+				{
+					throw new InvalidDataException($"Duplicate room ID {room.id}.");
+				}
+			}
+
+			Dictionary<int, List<int>> directChildren = roomsByID.Keys.ToDictionary(id => id, _ => new List<int>());
+			foreach (RoomData room in rooms)
+			{
+				if (room.parent_id is int parentID)
+				{
+					ValidateConfiguredID(parentID, $"Parent ID {parentID} on room {room.id}");
+					if (parentID == room.id || !roomsByID.ContainsKey(parentID))
+					{
+						throw new InvalidDataException($"Room {room.id} has invalid or missing parent room {parentID}.");
+					}
+
+					directChildren[parentID].Add(room.id);
+				}
+
+				if (room.target_room_id is int targetRoomID)
+				{
+					ValidateConfiguredID(targetRoomID, $"Target room ID {targetRoomID} on room {room.id}");
+					if (!roomsByID.ContainsKey(targetRoomID))
+					{
+						throw new InvalidDataException($"Room {room.id} targets missing room {targetRoomID}.");
+					}
+				}
+			}
+
+			Dictionary<int, HashSet<int>> descendantRoomIDs = new();
+			HashSet<int> visiting = new();
+
+			HashSet<int> BuildDescendants(int roomID)
+			{
+				if (descendantRoomIDs.TryGetValue(roomID, out HashSet<int>? cached))
+				{
+					return cached;
+				}
+
+				if (!visiting.Add(roomID))
+				{
+					throw new InvalidDataException($"Room hierarchy contains a cycle involving room {roomID}.");
+				}
+
+				HashSet<int> descendants = new();
+				foreach (int childID in directChildren[roomID])
+				{
+					descendants.Add(childID);
+					descendants.UnionWith(BuildDescendants(childID));
+				}
+
+				visiting.Remove(roomID);
+				descendantRoomIDs[roomID] = descendants;
+				return descendants;
+			}
+
+			foreach (RoomData room in rooms)
+			{
+				HashSet<int> descendants = BuildDescendants(room.id);
+				bool isMetaRoom = descendants.Count > 0;
+				// Retain the field for older clients, but routing is defined solely by the room hierarchy.
+				room.flags = ERoomFlags.ROOM_FLAGS_NONE;
+
+				if (isMetaRoom && room.target_room_id is not int)
+				{
+					throw new InvalidDataException($"Meta room {room.id} must define target_room_id.");
+				}
+
+				if (!isMetaRoom && room.target_room_id is int)
+				{
+					throw new InvalidDataException($"Concrete room {room.id} cannot define target_room_id.");
+				}
+
+				if (room.target_room_id is int targetRoomID)
+				{
+					if (!descendants.Contains(targetRoomID))
+					{
+						throw new InvalidDataException($"Meta room {room.id} must target one of its descendant rooms.");
+					}
+
+					if (directChildren[targetRoomID].Count > 0)
+					{
+						throw new InvalidDataException($"Meta room {room.id} must target a concrete room without children.");
+					}
+				}
+			}
+
+			return new RoomCatalogData
+			{
+				Rooms = rooms,
+				RoomsByID = roomsByID,
+				DescendantRoomIDs = descendantRoomIDs
+			};
+		}
+
+		private static void ValidateConfiguredID(int id, string description)
+		{
+			if (id < 0 || id > Int16.MaxValue)
+			{
+				throw new InvalidDataException($"{description} must be a nonnegative Int16 value.");
+			}
+		}
 	}
 
 	public class UserSocialContainer
@@ -356,6 +556,8 @@ namespace GenOnlineService
 
 		public static async Task Tick()
 		{
+			FlushLobbyListUpdates();
+
 			// Give the entire tick a 20 ms deadline. All users drain concurrently via
 			// Task.WhenAll, so a slow/stuck client cannot delay others. If the deadline
 			// fires, the CancellationToken propagates into each in-flight SendAsync and
@@ -695,126 +897,173 @@ namespace GenOnlineService
 
 
 		// helpers
-		public static async Task SendNewOrDeletedLobbyToAllNetworkRoomMembers(int networkRoomID)
-		{
-			if (networkRoomID != -1)
-			{
-				// need a member list update
-				WebSocketMessage_CurrentNetworkRoomLobbyListUpdate lobbyListUpdate = new WebSocketMessage_CurrentNetworkRoomLobbyListUpdate();
-				lobbyListUpdate.msg_id = (int)EWebSocketMessageID.NETWORK_ROOM_LOBBY_LIST_UPDATE;
-				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(lobbyListUpdate));
+		private static readonly object g_dirtyLobbyRoomsLock = new();
+		private static readonly HashSet<int> g_dirtyLobbyRooms = new();
+		private static readonly HashSet<UserSession> g_dirtyLobbySessions = new();
+		private static readonly object g_dirtyMemberRoomsLock = new();
+		private static readonly HashSet<int> g_dirtyMemberRooms = new();
 
-				// populate list of everyone in the room
-				foreach (var sessionDataByClient in m_dictUserSessions)
+		public static void QueueLobbyListUpdateForViewers(int networkRoomID)
+		{
+			if (networkRoomID < 0)
+			{
+				return;
+			}
+
+			lock (g_dirtyLobbyRoomsLock)
+			{
+				g_dirtyLobbyRooms.Add(networkRoomID);
+			}
+		}
+
+		public static void QueueLobbyListUpdateForSession(UserSession session)
+		{
+			lock (g_dirtyLobbyRoomsLock)
+			{
+				g_dirtyLobbySessions.Add(session);
+			}
+		}
+
+		internal static void FlushLobbyListUpdates()
+		{
+			int[] dirtyRooms;
+			HashSet<UserSession> directlyDirtySessions;
+			lock (g_dirtyLobbyRoomsLock)
+			{
+				dirtyRooms = g_dirtyLobbyRooms.ToArray();
+				directlyDirtySessions = new HashSet<UserSession>(g_dirtyLobbySessions);
+				g_dirtyLobbyRooms.Clear();
+				g_dirtyLobbySessions.Clear();
+			}
+
+			if (dirtyRooms.Length == 0 && directlyDirtySessions.Count == 0)
+			{
+				return;
+			}
+
+			byte[] bytesJSON = CreateLobbyListUpdateBytes();
+			HashSet<UserSession> sessionsToCheck = new(m_dictUserSessions.Values.SelectMany(sessions => sessions.Values));
+			sessionsToCheck.UnionWith(directlyDirtySessions);
+			foreach (UserSession session in sessionsToCheck)
+			{
+				if (directlyDirtySessions.Contains(session)
+					|| dirtyRooms.Any(roomID => RoomCatalog.CanViewLobby(session.selectedNetworkRoomID, roomID)))
 				{
-					foreach (var sessionData in sessionDataByClient.Value)
-					{
-						if (sessionData.Value != null)
-						{
-							if (sessionData.Value.networkRoomID == networkRoomID || sessionData.Value.networkRoomID == 0)
-							{
-								sessionData.Value.QueueWebsocketSend(bytesJSON);
-							}
-						}
-					}
+					session.QueueWebsocketSend(bytesJSON);
 				}
 			}
 		}
 
-		private static ConcurrentList<int> g_lstDirtyNetworkRooms = new();
-		public static async Task TickRoomMemberList()
+		private static byte[] CreateLobbyListUpdateBytes()
 		{
-			foreach (int roomID in g_lstDirtyNetworkRooms)
+			WebSocketMessage_CurrentNetworkRoomLobbyListUpdate lobbyListUpdate = new()
 			{
-				
-				// need a member list update
-				WebSocketMessage_NetworkRoomMemberListUpdate memberListUpdate = new WebSocketMessage_NetworkRoomMemberListUpdate();
-				memberListUpdate.msg_id = (int)EWebSocketMessageID.NETWORK_ROOM_MEMBER_LIST_UPDATE;
-				memberListUpdate.members = new();
+				msg_id = (int)EWebSocketMessageID.NETWORK_ROOM_LOBBY_LIST_UPDATE
+			};
+			return Encoding.UTF8.GetBytes(JsonSerializer.Serialize(lobbyListUpdate));
+		}
 
-				Dictionary<EUserSessionType, SortedDictionary<Int64, bool>> usersAlreadyProcessed = new();
-				// create base
-				foreach (EUserSessionType sessionType in Enum.GetValues<EUserSessionType>())
+		public static void QueueRoomSelectionAccepted(UserSession session, UInt64? requestID)
+		{
+			QueueRoomSelectionResult(session, requestID, null, null);
+		}
+
+		public static void QueueRoomSelectionRejected(UserSession session, UInt64? requestID, int? rejectedRoomID, string error)
+		{
+			QueueRoomSelectionResult(session, requestID, rejectedRoomID, error);
+		}
+
+		private static void QueueRoomSelectionResult(UserSession session, UInt64? requestID, int? rejectedRoomID, string? error)
+		{
+			WebSocketMessage_NetworkRoomMemberListUpdate memberListUpdate = CreateRoomMemberListUpdate(session.networkRoomID);
+			memberListUpdate.request_id = requestID;
+			memberListUpdate.selected_room_id = session.selectedNetworkRoomID;
+			memberListUpdate.rejected_room_id = rejectedRoomID;
+			memberListUpdate.room_selection_error = error;
+			session.QueueWebsocketSend(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(memberListUpdate)));
+		}
+
+		private static WebSocketMessage_NetworkRoomMemberListUpdate CreateRoomMemberListUpdate(int roomID)
+		{
+			WebSocketMessage_NetworkRoomMemberListUpdate memberListUpdate = new()
+			{
+				msg_id = (int)EWebSocketMessageID.NETWORK_ROOM_MEMBER_LIST_UPDATE
+			};
+			if (roomID < 0)
+			{
+				return memberListUpdate;
+			}
+
+			HashSet<(EUserSessionType, Int64)> usersAlreadyProcessed = new();
+
+			foreach (UserSession session in m_dictUserSessions.Values.SelectMany(byType => byType.Values))
+			{
+				EUserSessionType sessionType = session.GetSessionType();
+				if (session.networkRoomID != roomID || !usersAlreadyProcessed.Add((sessionType, session.m_UserID)))
 				{
-					usersAlreadyProcessed[sessionType] = new SortedDictionary<long, bool>();
+					continue;
 				}
 
-				List<Int64> lstUsersToSend = new();
-
-				// populate list of everyone in the room
-				foreach (var sessionDataByClient in m_dictUserSessions)
+				SharedUserData? sharedUserData = GetSharedDataForUser(session.m_UserID);
+				if (sharedUserData == null)
 				{
-					foreach (var sessionData in sessionDataByClient.Value)
-					{
-						UserSession sess = sessionData.Value;
-						if (sess.networkRoomID == roomID)
-						{
-							EUserSessionType sessType = sessionData.Value.GetSessionType();
-							if (!usersAlreadyProcessed[sessType].ContainsKey(sess.m_UserID))
-							{
-								usersAlreadyProcessed[sessType][sess.m_UserID] = true;
-
-								SharedUserData? sharedUserData = WebSocketManager.GetSharedDataForUser(sess.m_UserID);
-								if (sharedUserData != null)
-								{
-									// add to member list
-									string strDisplayName = sharedUserData.IsAdmin() ? String.Format("[\u2605\u2605GO STAFF\u2605\u2605] {0}", sharedUserData.m_strDisplayName) : sharedUserData.m_strDisplayName;
-									
-									// append client, if not game
-									if (sessType != EUserSessionType.GameClient)
-									{
-										if (sessType == EUserSessionType.GameLauncher)
-										{
-											if (sessionData.Value.m_client_id == KnownClients.EKnownClients.genhub)
-											{
-												strDisplayName += " [GENHUB]";
-											}
-											else
-											{
-												strDisplayName += " [LAUNCHER]";
-											}
-										}
-										else if (sessType == EUserSessionType.ChatClient)
-										{
-											strDisplayName += " [WEBCHAT]";
-										}
-									}
-									
-
-									memberListUpdate.members.Add(new RoomMember(sess.m_UserID, strDisplayName, sharedUserData.IsAdmin()));
-
-									// also add to list of users who need this update, since they were in there
-									lstUsersToSend.Add(sess.m_UserID);
-								}
-							}
-						}
-					}
+					continue;
 				}
 
+				string displayName = sharedUserData.IsAdmin()
+					? String.Format("[★★GO STAFF★★] {0}", sharedUserData.m_strDisplayName)
+					: sharedUserData.m_strDisplayName;
+
+				if (sessionType == EUserSessionType.GameLauncher)
+				{
+					displayName += session.m_client_id == KnownClients.EKnownClients.genhub ? " [GENHUB]" : " [LAUNCHER]";
+				}
+				else if (sessionType == EUserSessionType.ChatClient)
+				{
+					displayName += " [WEBCHAT]";
+				}
+
+				memberListUpdate.members.Add(new RoomMember(session.m_UserID, displayName, sharedUserData.IsAdmin()));
+			}
+
+			return memberListUpdate;
+		}
+
+		public static void TickRoomMemberList()
+		{
+			int[] dirtyRooms;
+			lock (g_dirtyMemberRoomsLock)
+			{
+				dirtyRooms = g_dirtyMemberRooms.ToArray();
+				g_dirtyMemberRooms.Clear();
+			}
+
+			foreach (int roomID in dirtyRooms)
+			{
+				WebSocketMessage_NetworkRoomMemberListUpdate memberListUpdate = CreateRoomMemberListUpdate(roomID);
 				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(memberListUpdate));
 
-				// what if they have clients in different net rooms?
-
-				// now send to everyone in the room
-				foreach (Int64 user_id in lstUsersToSend)
+				foreach (UserSession session in m_dictUserSessions.Values.SelectMany(byType => byType.Values))
 				{
-					// find all of their websockets, and send it to any who are in this network room
-					foreach (UserSession sess in WebSocketManager.GetAllDataFromUser(user_id))
+					if (session.networkRoomID == roomID)
 					{
-						if (sess.networkRoomID == roomID)
-						{
-							sess.QueueWebsocketSend(bytesJSON);
-						}
+						session.QueueWebsocketSend(bytesJSON);
 					}
 				}
 			}
-
-			g_lstDirtyNetworkRooms.Clear();
 		}
 
-		public static async Task MarkRoomMemberListAsDirty(int roomID)
+		public static void MarkRoomMemberListAsDirty(int roomID)
 		{
-			g_lstDirtyNetworkRooms.Add(roomID);
+			if (roomID < 0)
+			{
+				return;
+			}
+
+			lock (g_dirtyMemberRoomsLock)
+			{
+				g_dirtyMemberRooms.Add(roomID);
+			}
 		}
 	}
 
@@ -1103,25 +1352,31 @@ namespace GenOnlineService
 			return bWasInMatch;
 		}
 
-		public async Task UpdateSessionNetworkRoom(Int16 newRoomID)
+		public bool TryUpdateSessionNetworkRoom(Int16 newRoomID)
 		{
+			if (!RoomCatalog.TryResolveTargetRoomID(newRoomID, out Int16 targetRoomID))
+			{
+				Console.WriteLine($"Rejected invalid network room selection {newRoomID} from user {m_UserID}; keeping selected room {selectedNetworkRoomID}.");
+				return false;
+			}
+
 			Int16 oldRoom = networkRoomID;
-			networkRoomID = newRoomID;
+			Int16 oldSelectedRoom = selectedNetworkRoomID;
+			selectedNetworkRoomID = newRoomID;
+			networkRoomID = targetRoomID;
 
-			// update the room roster they left
-			if (oldRoom >= 0) // only if they werent in the dummy room before
+			if (oldRoom != networkRoomID)
 			{
-				await WebSocketManager.MarkRoomMemberListAsDirty(oldRoom);
+				WebSocketManager.MarkRoomMemberListAsDirty(oldRoom);
+				WebSocketManager.MarkRoomMemberListAsDirty(networkRoomID);
 			}
 
-			// send update to joiner + everyone in new room already
-			if (newRoomID >= 0) // only if they actually joined a room and weren't going to the dummy room
+			if (oldSelectedRoom != selectedNetworkRoomID && selectedNetworkRoomID >= 0)
 			{
-				await WebSocketManager.MarkRoomMemberListAsDirty(newRoomID);
+				WebSocketManager.QueueLobbyListUpdateForSession(this);
 			}
 
-			// make the client force refresh list too
-			await WebSocketManager.SendNewOrDeletedLobbyToAllNetworkRoomMembers(this.networkRoomID);
+			return true;
 		}
 
 		public void UpdateSessionLobbyID(Int64 newLobbyID)
@@ -1132,7 +1387,10 @@ namespace GenOnlineService
 			}
 		}
 
-		// network room
+		// The room selected by the client controls lobby discovery.
+		public Int16 selectedNetworkRoomID = -1;
+
+		// The resolved target room controls player presence, room chat, and lobby creation.
 		public Int16 networkRoomID = -1;
 
 
@@ -2785,6 +3043,18 @@ namespace GenOnlineService
 	public class WebSocketMessage_NetworkRoomMemberListUpdate : WebSocketMessage
 	{
 		public List<RoomMember> members { get; set; } = new();
+
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public UInt64? request_id { get; set; }
+
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public Int16? selected_room_id { get; set; }
+
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public int? rejected_room_id { get; set; }
+
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public string? room_selection_error { get; set; }
 	}
 
 	public class WebSocketMessage_CurrentLobbyUpdate : WebSocketMessage

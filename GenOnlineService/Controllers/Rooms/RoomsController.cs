@@ -33,6 +33,7 @@ namespace GenOnlineService.Controllers
 		}
 
 		public List<RoomData>? rooms { get; set; } = null;
+		public bool supports_room_selection_results { get; set; } = true;
 	}
 
 	[ApiController]
@@ -55,16 +56,9 @@ namespace GenOnlineService.Controllers
 			using (var reader = new StreamReader(HttpContext.Request.Body))
 			{
 				string jsonData = await reader.ReadToEndAsync();
-				var options = new JsonSerializerOptions
-				{
-					PropertyNameCaseInsensitive = true
-				};
-
 				try
 				{
-					string strFileData = await System.IO.File.ReadAllTextAsync(Path.Combine("data", "rooms.json"));
-					List<RoomData>? lstRooms = JsonSerializer.Deserialize<List<RoomData>>(strFileData, options);
-					result.rooms = lstRooms;
+					result.rooms = new List<RoomData>(RoomCatalog.Rooms);
 				}
 				catch
 				{

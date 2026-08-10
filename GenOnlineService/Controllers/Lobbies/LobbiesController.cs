@@ -61,8 +61,6 @@ namespace GenOnlineService.Controllers
 	public class LobbiesController : ControllerBase
 	{
 		private readonly ILogger<LobbiesController> _logger;
-		private static List<RoomData>? s_cachedRooms = null;
-		private static readonly object s_roomsLock = new object();
 
 		private readonly LobbyManager _lobbyManager;
 		private readonly IDbContextFactory<AppDbContext> _dbFactory;
@@ -73,23 +71,6 @@ namespace GenOnlineService.Controllers
 			_logger = logger;
 			_lobbyManager = lobbyManager;
 			_dbFactory = dbFactory;
-		}
-
-		// Cache rooms.json data to avoid disk I/O on every request
-		private static async Task<List<RoomData>?> GetCachedRooms(JsonSerializerOptions options)
-		{
-			if (s_cachedRooms == null)
-			{
-				lock (s_roomsLock)
-				{
-					if (s_cachedRooms == null)
-					{
-						string strFileData = System.IO.File.ReadAllText(Path.Combine("data", "rooms.json"));
-						s_cachedRooms = JsonSerializer.Deserialize<List<RoomData>>(strFileData, options);
-					}
-				}
-			}
-			return await Task.FromResult(s_cachedRooms);
 		}
 
 		// FOR LATENCY ESTIMATIONS
@@ -139,15 +120,10 @@ namespace GenOnlineService.Controllers
 			using (var reader = new StreamReader(HttpContext.Request.Body))
 			{
 				string jsonData = await reader.ReadToEndAsync();
-				var options = new JsonSerializerOptions
-				{
-					PropertyNameCaseInsensitive = true,
-				};
-
 				try
 				{
 					// find our network room ID
-					Int16 networkRoomID = -1;
+					Int16 selectedRoomID = -1;
 					bool bIncludeAllNetworkRooms = false;
 					List<Lobby>? lstLobbies = null;
 					List<int> lstLatencies = new();
@@ -163,34 +139,14 @@ namespace GenOnlineService.Controllers
 
 						if (sourceData != null)
 						{
-							// Use cached rooms data
-							List<RoomData>? lstRooms = await GetCachedRooms(options);
-							if (lstRooms != null)
-							{
-								foreach (RoomData room in lstRooms)
-								{
-									if (room.id == sourceData.networkRoomID)
-									{
-										if (room.flags == ERoomFlags.ROOM_FLAGS_SHOW_ALL_MATCHES)
-										{
-											bIncludeAllNetworkRooms = true;
-										}
-
-										break;
-									}
-								}
-							}
-							else
-							{
-								Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-							}
+							selectedRoomID = sourceData.selectedNetworkRoomID;
 						}
 						else
 						{
 							bIncludeAllNetworkRooms = true;
 						}
 
-							lstLobbies = _lobbyManager.GetAllLobbies(networkRoomID, true, true, false, false, bIncludeAllNetworkRooms);
+							lstLobbies = _lobbyManager.GetAllLobbies(selectedRoomID, true, true, false, false, bIncludeAllNetworkRooms);
 
 						List<Lobby> lstLobbiesToRemove = new();
 
@@ -257,10 +213,10 @@ namespace GenOnlineService.Controllers
 					}
 					else if (this.User.IsInRole("Monitor"))
 					{
-						networkRoomID = 0;
+						selectedRoomID = -1;
 						bIncludeAllNetworkRooms = true;
 
-						lstLobbies = _lobbyManager.GetAllLobbies(networkRoomID, true, true, true, true, bIncludeAllNetworkRooms);
+						lstLobbies = _lobbyManager.GetAllLobbies(selectedRoomID, true, true, true, true, bIncludeAllNetworkRooms);
 					}
 					else
 					{
@@ -380,16 +336,14 @@ namespace GenOnlineService.Controllers
 								await using var db = await _dbFactory.CreateDbContextAsync();
 								string strDisplayName = await Database.Users.GetDisplayName(db, user_id);
 
+								Int16 lobbyNetworkRoomID = playerSession.networkRoomID;
 								Int64 newLobbyID = await _lobbyManager.CreateLobby(db, playerSession, strDisplayName, strName, strMapName, strMapPath, bMapOfficial, maxPlayers, strIPAddr,
-									hostPreferredPort, bVanillaTeamsOnly, bTrackStats, starting_cash, bPassworded, strPassword, playerSession.networkRoomID, bAllowObservers, maxCamHeight, exe_crc, ini_crc, ELobbyType.CustomGame, anticheatID);
+									hostPreferredPort, bVanillaTeamsOnly, bTrackStats, starting_cash, bPassworded, strPassword, lobbyNetworkRoomID, bAllowObservers, maxCamHeight, exe_crc, ini_crc, ELobbyType.CustomGame, anticheatID);
 
 								if (newLobbyID >= 0)
 								{
 									result.result = 1;
 									result.lobby_id = newLobbyID;
-
-									// mark lobby list as dirty
-									await WebSocketManager.SendNewOrDeletedLobbyToAllNetworkRoomMembers(playerSession.networkRoomID);
 
 									// TODO: What if this fails? just let them proceed? just means only direct connect people will be able to play
 									// get some turn credentials

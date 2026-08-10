@@ -177,14 +177,26 @@ namespace GenOnlineService
 
 		public void AddPassword(string password)
 		{
+			if (IsPassworded && Password == password)
+			{
+				return;
+			}
+
 			Password = password;
 			IsPassworded = true;
+			DirtyRetransmit(true);
 		}
 
 		public void RemovePassword()
 		{
+			if (!IsPassworded && Password.Length == 0)
+			{
+				return;
+			}
+
 			Password = String.Empty;
 			IsPassworded = false;
+			DirtyRetransmit(true);
 		}
 
 		public double GetLatitude() { return m_dHostLatitude; }
@@ -319,7 +331,11 @@ namespace GenOnlineService
 		}
 
 
-		private bool m_bIsDirty = false;
+		// Lobby-member updates and room-list invalidations are tracked separately.
+		// Initial synchronization retries only set the former, so they do not make
+		// every user viewing this room repeatedly reload the complete lobby list.
+		private int m_lobbyUpdatePending = 0;
+		private int m_lobbyListUpdatePending = 0;
 
 		[JsonIgnore]
 		private Int64 m_LastInitialSync = Environment.TickCount64;
@@ -460,7 +476,7 @@ namespace GenOnlineService
 						member.SetReadyState(true);
 
 						// mark as dirty
-						DirtyRetransmit();
+						DirtyRetransmit(true);
 
 						// we are done
 						break;
@@ -519,11 +535,11 @@ namespace GenOnlineService
 			if (m_InitialSyncs < 5 && Environment.TickCount64 - m_LastInitialSync > 200)
 			{
 				m_LastInitialSync = Environment.TickCount64;
-				m_bIsDirty = true;
+				Interlocked.Exchange(ref m_lobbyUpdatePending, 1);
 				++m_InitialSyncs;
 			}
 
-			if (m_bIsDirty)
+			if (Interlocked.Exchange(ref m_lobbyUpdatePending, 0) != 0)
 			{
 				WebSocketMessage_CurrentLobbyUpdate lobbyUpdate = new WebSocketMessage_CurrentLobbyUpdate();
 				lobbyUpdate.msg_id = (int)EWebSocketMessageID.LOBBY_CURRENT_LOBBY_UPDATE;
@@ -542,11 +558,11 @@ namespace GenOnlineService
 						}
 					}
 				}
+			}
 
-				// transmit to those in network room
-				//WebSocketManager.SendNewOrDeletedLobbyToAllNetworkRoomMembers(NetworkRoomID);
-
-				m_bIsDirty = false;
+			if (Interlocked.Exchange(ref m_lobbyListUpdatePending, 0) != 0)
+			{
+				WebSocketManager.QueueLobbyListUpdateForViewers(NetworkRoomID);
 			}
 		}
 
@@ -684,7 +700,7 @@ namespace GenOnlineService
 			TimeMemberLeft[playerSession.m_UserID] = DateTime.UnixEpoch;
 
 			// leave network room we were in
-			playerSession.UpdateSessionNetworkRoom(-1);
+			playerSession.TryUpdateSessionNetworkRoom(-1);
 
 			// store our lobby ID
 			playerSession.UpdateSessionLobbyID(LobbyID);
@@ -740,7 +756,7 @@ namespace GenOnlineService
 			// END NETWORK SIGNALLING
 
 			// also update the lobby for everyone inside of it
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 
 			Console.WriteLine("User {0} joined lobby {1}: {2} (Slot was {3})", playerSession.m_UserID, LobbyID, true, slotIndex);
 			return true;
@@ -804,7 +820,7 @@ namespace GenOnlineService
 
 			await OnAfterPlayerLeft(UserID);
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public int GetNumberOfHumans()
@@ -849,9 +865,13 @@ namespace GenOnlineService
 			}
 		}
 
-		public void DirtyRetransmit()
+		public void DirtyRetransmit(bool invalidateLobbyList = false)
 		{
-			m_bIsDirty = true;
+			Interlocked.Exchange(ref m_lobbyUpdatePending, 1);
+			if (invalidateLobbyList)
+			{
+				Interlocked.Exchange(ref m_lobbyListUpdatePending, 1);
+			}
 		}
 
 		public async Task DirtyRetransmitToSingleMember(Int64 targetUserID)
@@ -930,7 +950,7 @@ namespace GenOnlineService
 				await Database.Users.SetFavorite_Map(_db, Owner, strMapPath);
 			}
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public async Task UpdateStartingCash(AppDbContext _db, UInt32 newStartingCash)
@@ -939,7 +959,7 @@ namespace GenOnlineService
 
 			await Database.Users.SetFavorite_StartingMoney(_db, Owner, (int)newStartingCash);
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public async Task UpdateLimitSuperweapons(AppDbContext _db, bool bLimitSuperweapons)
@@ -948,7 +968,7 @@ namespace GenOnlineService
 
 			await Database.Users.SetFavorite_LimitSuperweapons(_db, Owner, bLimitSuperweapons);
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public void ForceReady()
@@ -1035,16 +1055,17 @@ namespace GenOnlineService
 				
 			}
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public void UpdateJoinability(ELobbyJoinability newJoinability)
 		{
 			// must be a custom match
-			if (LobbyType == ELobbyType.CustomGame)
+			if (LobbyType == ELobbyType.CustomGame && LobbyJoinability != newJoinability)
 			{
-                LobbyJoinability = newJoinability;
-            }
+				LobbyJoinability = newJoinability;
+				DirtyRetransmit(true);
+			}
 		}
 
 		public void UpdateMaxCameraHeight(UInt16 maxCamHeight)
@@ -1158,10 +1179,10 @@ namespace GenOnlineService
 		public bool IsHuman() {  return SlotState == EPlayerType.SLOT_PLAYER; }
 		public bool IsAI() { return SlotState == EPlayerType.SLOT_EASY_AI || SlotState == EPlayerType.SLOT_MED_AI || SlotState == EPlayerType.SLOT_BRUTAL_AI; }
 
-		private void DirtyRetransmit()
+		private void DirtyRetransmit(bool invalidateLobbyList = false)
 		{
 			CurrentLobby.TryGetTarget(out Lobby? lobby);
-			lobby?.DirtyRetransmit();
+			lobby?.DirtyRetransmit(invalidateLobbyList);
 		}
 
 		public void SetReadyState(bool bReady)
@@ -1181,7 +1202,7 @@ namespace GenOnlineService
 				IsReady = true;
 			}
 
-			DirtyRetransmit();
+			DirtyRetransmit(true);
 		}
 
 		public async Task UpdateSide(AppDbContext _db, int newSide, int start_pos)
@@ -1351,10 +1372,9 @@ namespace GenOnlineService
 				bool bJoined = await JoinLobby(_db, newLobby, owningSession, strOwnerDisplayName, hostPreferredPort, true);
 			}
 
-			newLobby.DirtyRetransmit();
-
-			// inform
-			await WebSocketManager.SendNewOrDeletedLobbyToAllNetworkRoomMembers(parentNetworkRoom);
+			// Queue both the initial member state and a room-list invalidation. The
+			// lobby tick coalesces this with any mutations made while joining the host.
+			newLobby.DirtyRetransmit(true);
 
 			return newLobbyID;
 		}
@@ -1399,13 +1419,13 @@ namespace GenOnlineService
 			}
 		}
 
-		public List<Lobby> GetAllLobbies(Int16 networkRoomID, bool bIncludePassword, bool bAllowInSetup, bool bAllowInGame, bool bAllowCompleted, bool bIncludeAllNetworkRooms)
+		public List<Lobby> GetAllLobbies(Int16 selectedRoomID, bool bIncludePassword, bool bAllowInSetup, bool bAllowInGame, bool bAllowCompleted, bool bIncludeAllNetworkRooms)
 		{
 			List<Lobby> listLobbies = new List<Lobby>();
 			foreach (var kvp in m_dictLobbies)
 			{
 				Lobby lobby = kvp.Value;
-				if (!bIncludeAllNetworkRooms && lobby.NetworkRoomID != networkRoomID)
+				if (!bIncludeAllNetworkRooms && !RoomCatalog.CanViewLobby(selectedRoomID, lobby.NetworkRoomID))
 				{
 					continue;
 				}
@@ -1570,11 +1590,12 @@ namespace GenOnlineService
 
 				// delete
 				bool bRemoved = m_dictLobbies.Remove(lobby.LobbyID, out _);
-				await WebSocketManager.SendNewOrDeletedLobbyToAllNetworkRoomMembers(lobby.NetworkRoomID);
 
 				// only do this once
 				if (bRemoved)
 				{
+					WebSocketManager.QueueLobbyListUpdateForViewers(lobby.NetworkRoomID);
+
 					// unsubscribe from self-destruct event
 					lobby.OnLobbyNeedsDestroyed -= HandleLobbyNeedsDestroyed;
 
