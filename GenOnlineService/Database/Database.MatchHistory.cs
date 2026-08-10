@@ -722,10 +722,10 @@ namespace Database
 
 
 
-		public static async Task<MatchHistoryCollection> GetMatchesInRange(
+		public static async Task<List<MatchHistory_Entry>> GetMatchesInRange(
 	AppDbContext db, long startID, long endID)
 		{
-			MatchHistoryCollection collection = new();
+			List<MatchHistory_Entry> matches = new();
 
 			try
 			{
@@ -791,7 +791,7 @@ namespace Database
 					AddMemberIfNotNull(entry, row.MemberSlot6);
 					AddMemberIfNotNull(entry, row.MemberSlot7);
 
-					collection.matches.Add(entry);
+					matches.Add(entry);
 				}
 			}
 			catch (Exception ex)
@@ -800,13 +800,13 @@ namespace Database
 				SentrySdk.CaptureException(ex);
 			}
 
-			return collection;
+			return matches;
 		}
 
-		public static async Task<MatchHistoryCollection> GetMatchesSince(
+		public static async Task<List<MatchHistory_Entry>> GetMatchesSince(
 	AppDbContext db, DateTime since, int maxLobbiesPerRequest)
 		{
-			MatchHistoryCollection collection = new();
+			List<MatchHistory_Entry> matches = new();
 
 			since = DateTime.SpecifyKind(since, DateTimeKind.Utc);
 
@@ -843,7 +843,7 @@ namespace Database
 					AddMemberIfNotNull(entry, row.MemberSlot6);
 					AddMemberIfNotNull(entry, row.MemberSlot7);
 
-					collection.matches.Add(entry);
+					matches.Add(entry);
 				}
 			}
 			catch (Exception ex)
@@ -852,7 +852,7 @@ namespace Database
 				SentrySdk.CaptureException(ex);
 			}
 
-			return collection;
+			return matches;
 		}
 
 		private static void AddMemberIfNotNull(MatchHistory_Entry entry, string? json)

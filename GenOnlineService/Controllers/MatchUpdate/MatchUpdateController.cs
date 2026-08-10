@@ -42,16 +42,6 @@ namespace GenOnlineService.Controllers
 		}
 	}
 
-	public class MatchHistoryCollection : APIResult
-	{
-		public override Type GetReturnType()
-		{
-			return this.GetType();
-		}
-
-		public List<MatchHistory_Entry> matches { get; private set; } = new List<MatchHistory_Entry>();
-	}
-
 	public class MatchHistory_Entry
 	{
 		public MatchHistory_Entry(

@@ -94,7 +94,7 @@ namespace GenOnlineService.Controllers
 			return this.GetType();
 		}
 
-		public MatchHistoryCollection matches { get; set; } = new();
+		public List<MatchHistory_Entry> matches { get; set; } = new();
 	}
 
 	public class RouteHandler_POST_Lobby_Result : APIResult
