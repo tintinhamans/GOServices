@@ -20,7 +20,9 @@ using Google.Protobuf.WellKnownTypes;
 using MaxMind.GeoIP2;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebSockets;
@@ -366,10 +368,6 @@ namespace GenOnlineService
 			string? password = dbSettings.GetValue<string>("db_password");
 			UInt16? port = dbSettings.GetValue<UInt16>("db_port");
 
-			int? db_min_poolsize = dbSettings.GetValue<int>("db_min_poolsize");
-			int? db_max_poolsize = dbSettings.GetValue<int>("db_max_poolsize");
-			bool? db_use_pooling = dbSettings.GetValue<bool>("db_use_pooling");
-			bool? db_conn_reset = dbSettings.GetValue<bool>("db_conn_reset");
 			int? db_connect_timeout = dbSettings.GetValue<int>("db_connect_timeout");
 			int? db_command_timeout = dbSettings.GetValue<int>("db_command_timeout");
 
@@ -621,31 +619,27 @@ namespace GenOnlineService
 			}
 		}
 
-		public static string GetWebSocketAddress(bool bSecure)
+		public static string GetWebSocketAddress(HttpRequest request)
 		{
-			if (Program.g_Config == null)
+			string webSocketScheme = request.Scheme switch
 			{
-				throw new Exception("g_Config is null.");
+				"https" => "wss",
+				"http" => "ws",
+				_ => throw new Exception($"Cannot derive a WebSocket URL from request scheme '{request.Scheme}'.")
+			};
+
+			if (!request.Host.HasValue)
+			{
+				throw new Exception("Cannot derive a WebSocket URL because the request Host is empty.");
 			}
 
-			IConfiguration? coreSettings = Program.g_Config.GetSection("Core");
-
-			if (coreSettings == null)
+			var webSocketUri = new UriBuilder(webSocketScheme, request.Host.Host)
 			{
-				throw new Exception("Core section of config is null.");
-			}
+				Port = request.Host.Port ?? -1,
+				Path = request.PathBase.Add(new PathString("/ws")).Value
+			};
 
-
-			string configKey = bSecure ? "ws_address" : "ws_address_insecure";
-
-			string? ws_address = coreSettings.GetValue<string>(configKey);
-
-			if (ws_address == null)
-			{
-				throw new Exception(String.Format("{0} in Core section of config is null.", configKey));
-			}
-
-			return ws_address;
+			return webSocketUri.Uri.AbsoluteUri;
 		}
 
 		public static async Task Main(string[] args)
@@ -663,6 +657,21 @@ namespace GenOnlineService
 
 			g_Config = builder.Configuration;
 
+			// When explicitly enabled, trust one forwarded hop so the original client IP,
+			// request scheme, and host are available to application code.
+			bool bTrustProxyForwardedHeaders = builder.Configuration.GetValue<bool>("ReverseProxy:TrustForwardedHeaders");
+			if (bTrustProxyForwardedHeaders)
+			{
+				builder.Services.Configure<ForwardedHeadersOptions>(options =>
+				{
+					options.ForwardedHeaders = ForwardedHeaders.XForwardedFor
+						| ForwardedHeaders.XForwardedProto
+						| ForwardedHeaders.XForwardedHost;
+					options.ForwardLimit = 1;
+					options.KnownIPNetworks.Clear();
+					options.KnownProxies.Clear();
+				});
+			}
 			ShowLogo();
 
 			IConfigurationSection? sentrySettings = Program.g_Config.GetSection("Sentry");
@@ -756,19 +765,31 @@ namespace GenOnlineService
 				});
 			}
 
+			string[] allowedOrigins = builder.Configuration
+				.GetSection("AllowedOrigins")
+				.Get<string[]>() ?? Array.Empty<string>();
+
+			var corsPolicyBuilder = new CorsPolicyBuilder()
+				.AllowAnyHeader()
+				.AllowAnyMethod();
+
+			if (allowedOrigins.Contains("*"))
+			{
+				// CORS forbids combining any-origin with credential sharing.
+				corsPolicyBuilder.AllowAnyOrigin();
+			}
+			else
+			{
+				corsPolicyBuilder.WithOrigins(allowedOrigins)
+					.SetIsOriginAllowedToAllowWildcardSubdomains()
+					.AllowCredentials();
+			}
+
+			CorsPolicy allowedOriginPolicy = corsPolicyBuilder.Build();
+
 			builder.Services.AddCors(options =>
 			{
-				options.AddDefaultPolicy(policy =>
-				{
-					policy.WithOrigins(
-						"https://localhost:9000",
-						"http://localhost:9001",
-						"https://*.playgenerals.online"
-					)
-					.AllowAnyHeader()
-					.AllowAnyMethod()
-					.AllowCredentials();
-				});
+				options.AddDefaultPolicy(allowedOriginPolicy);
 			});
 
 
@@ -962,35 +983,6 @@ namespace GenOnlineService
 				}
 			}
 
-			var kestrelSettings = Program.g_Config.GetSection("Kestrel");
-			var endpointSettings = kestrelSettings.GetSection("Endpoints");
-			var httpsSettings = endpointSettings.GetSection("HTTPS");
-			string? serverURI = httpsSettings.GetValue<string>("Url");
-
-			if (serverURI == null)
-			{
-				Console.WriteLine("FATAL ERROR: serverURI is not set in the config");
-				Console.ReadKey(true);
-				return;
-			}
-
-			// Parse the port number out of serverURI
-			int port = -1;
-			try
-			{
-				if (!string.IsNullOrEmpty(serverURI))
-				{
-					var uri = new Uri(serverURI);
-					port = uri.Port;
-				}
-			}
-			catch
-			{
-				Console.WriteLine("ERROR: Failed to parse port from serverURI: " + serverURI);
-			}
-
-
-
 			// options
 			builder.WebHost.ConfigureKestrel(options =>
 			{
@@ -1019,6 +1011,12 @@ namespace GenOnlineService
 			var app = builder.Build();
 			ServiceLocator.Services = app.Services;
 
+			if (bTrustProxyForwardedHeaders)
+			{
+				// Must run before anything that consumes client IP or request scheme.
+				app.UseForwardedHeaders();
+			}
+
 			if (bUseBuiltinRateLimiter)
 			{
 				app.UseRateLimiter();
@@ -1035,6 +1033,21 @@ namespace GenOnlineService
 			};
 
 			app.UseWebSockets(webSocketOptions);
+
+			// WebSockets do not use CORS, so apply the same origin policy to browser
+			// handshakes explicitly. Native clients may omit Origin.
+			app.Use(async (context, next) =>
+			{
+				if (context.WebSockets.IsWebSocketRequest
+					&& context.Request.Headers.TryGetValue("Origin", out var origins)
+					&& (origins.Count != 1 || !allowedOriginPolicy.IsOriginAllowed(origins[0]!)))
+				{
+					context.Response.StatusCode = StatusCodes.Status403Forbidden;
+					return;
+				}
+
+				await next(context);
+			});
 
 			// end websocket
 
