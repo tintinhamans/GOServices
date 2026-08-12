@@ -18,7 +18,6 @@
 
 #define USE_DISCORD_IN_DEBUG
 
-using Amazon.S3.Model;
 using Discord;
 using Discord.Rest;
 using Discord.WebSocket;

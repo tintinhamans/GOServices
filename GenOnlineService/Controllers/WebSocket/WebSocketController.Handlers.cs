@@ -577,7 +577,9 @@ namespace GenOnlineService.Controllers
 							// response
 							WebSocketMessage_StartMatch startCommand = new WebSocketMessage_StartMatch();
 							startCommand.msg_id = (int)EWebSocketMessageID.START_GAME;
-							startCommand.screenshot_url = await S3CredentialManager.GetPresignedURL(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_LOADSCREEN, lobbyInfo.MatchID, lobbyMember.UserID, lobbyMember.SlotIndex, lobbyInfo.TimeCreated);
+							S3CredentialManager.PresignedUpload? upload = await S3CredentialManager.GetPresignedUpload(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_LOADSCREEN, lobbyInfo.MatchID, lobbyMember.UserID, lobbyMember.SlotIndex, lobbyInfo.TimeCreated);
+							startCommand.screenshot_url = upload?.Url ?? String.Empty;
+							startCommand.screenshot_upload_confirmation_token = upload?.ConfirmationToken ?? String.Empty;
 
 							// Serialize once before broadcasting
 							byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(startCommand));

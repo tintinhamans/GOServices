@@ -16,7 +16,6 @@
 **    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-using Amazon.S3.Model;
 using Discord;
 using GenOnlineService.Controllers;
 using Microsoft.EntityFrameworkCore;
@@ -670,20 +669,22 @@ namespace GenOnlineService
 				{
 					foreach (LobbyMember memberEntry in Members)
 					{
-						// per user endpoint
-						string? strUploadURI = await S3CredentialManager.GetPresignedURL(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_GAMEPLAY, MatchID, memberEntry.UserID, memberEntry.SlotIndex, TimeCreated);
-
-						if (strUploadURI != null) // should never be null really
+						if (memberEntry.SlotState != EPlayerType.SLOT_PLAYER || !memberEntry.GetSession().TryGetTarget(out UserSession? session))
 						{
-							WebSocketMessage_Probe probe = new WebSocketMessage_Probe();
-							probe.msg_id = (int)EWebSocketMessageID.PROBE;
-							probe.url = strUploadURI;
-							byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(probe));
+							continue;
+						}
 
-							if (memberEntry.GetSession().TryGetTarget(out UserSession? session))
+						S3CredentialManager.PresignedUpload? upload = await S3CredentialManager.GetPresignedUpload(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_GAMEPLAY, MatchID, memberEntry.UserID, memberEntry.SlotIndex, TimeCreated);
+						if (upload != null)
+						{
+							WebSocketMessage_Probe probe = new WebSocketMessage_Probe
 							{
-								session.QueueWebsocketSend(bytesJSON);
-							}
+								msg_id = (int)EWebSocketMessageID.PROBE,
+								url = upload.Url,
+								upload_confirmation_token = upload.ConfirmationToken
+							};
+							byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(probe));
+							session.QueueWebsocketSend(bytesJSON);
 						}
 					}
 				}

@@ -1101,6 +1101,29 @@ namespace GenOnlineService
 			};
 			timerCleanup.Start();
 
+			if (S3CredentialManager.ReconciliationEnabled)
+			{
+				var uploadReconciliationTimer = new System.Timers.Timer(
+					TimeSpan.FromSeconds(S3CredentialManager.ReconcileIntervalSeconds));
+				uploadReconciliationTimer.AutoReset = false;
+				uploadReconciliationTimer.Elapsed += async (_, _) =>
+				{
+					try
+					{
+						await S3CredentialManager.ReconcilePendingUploads();
+					}
+					catch (Exception ex)
+					{
+						Console.WriteLine($"[match upload reconciliation] Exception: {ex}");
+					}
+					finally
+					{
+						uploadReconciliationTimer.Start();
+					}
+				};
+				uploadReconciliationTimer.Start();
+			}
+
 			// tick lobby
 			{
 				System.Timers.Timer timerTick = new System.Timers.Timer(5); // 5ms tick

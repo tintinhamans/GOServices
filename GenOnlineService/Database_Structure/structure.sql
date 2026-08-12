@@ -126,6 +126,31 @@ CREATE TABLE IF NOT EXISTS `match_history` (
 
 -- Data exporting was unselected.
 
+-- Dumping structure for table go_production.pending_match_uploads
+CREATE TABLE IF NOT EXISTS `pending_match_uploads` (
+  `upload_id` char(32) NOT NULL,
+  `token_hash` binary(32) NOT NULL,
+  `user_id` bigint(20) NOT NULL,
+  `match_id` bigint(20) NOT NULL,
+  `slot_index` tinyint(3) unsigned NOT NULL,
+  `bucket` varchar(255) NOT NULL,
+  `object_key` varchar(1024) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `file_name` varchar(255) NOT NULL,
+  `file_type` int(11) NOT NULL,
+  `created_utc` datetime(6) NOT NULL,
+  `upload_expires_utc` datetime(6) NOT NULL,
+  `confirmation_expires_utc` datetime(6) NOT NULL,
+  `next_check_utc` datetime(6) NOT NULL,
+  `check_attempts` int(11) NOT NULL DEFAULT 0,
+  `confirmed_utc` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`upload_id`),
+  UNIQUE KEY `ux_pending_match_uploads_object_key` (`object_key`),
+  KEY `ix_pending_match_uploads_reconcile` (`confirmed_utc`,`next_check_utc`),
+  KEY `ix_pending_match_uploads_expiry` (`confirmation_expires_utc`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- Data exporting was unselected.
+
 -- Dumping structure for table go_production.pending_logins
 CREATE TABLE IF NOT EXISTS `pending_logins` (
   `code` varchar(32) NOT NULL,

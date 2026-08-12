@@ -16,7 +16,6 @@
 **    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-using Amazon.S3.Model;
 using Discord.Commands;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;

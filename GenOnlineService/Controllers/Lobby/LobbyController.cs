@@ -75,6 +75,8 @@ namespace GenOnlineService.Controllers
 
 		public string screenshot_url { get; set; } = String.Empty;
 		public string replay_url { get; set; } = String.Empty;
+		public string screenshot_upload_confirmation_token { get; set; } = String.Empty;
+		public string replay_upload_confirmation_token { get; set; } = String.Empty;
 	}
 
 	public class RouteHandler_Get_MatchHistory_HighestMatchID_Result : APIResult
@@ -340,8 +342,13 @@ namespace GenOnlineService.Controllers
 								}
 
 								// give them back signed URLs they need
-								result.screenshot_url = await S3CredentialManager.GetPresignedURL(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_SCORESCREEN, match_id, user_id, slotIndexInLobby, LobbyCreationTime) ?? String.Empty;
-								result.replay_url = await S3CredentialManager.GetPresignedURL(EMetadataFileType.FILE_TYPE_REPLAY, EScreenshotType.NONE, match_id, user_id, slotIndexInLobby, LobbyCreationTime) ?? String.Empty;
+								S3CredentialManager.PresignedUpload? screenshotUpload = await S3CredentialManager.GetPresignedUpload(EMetadataFileType.FILE_TYPE_SCREENSHOT, EScreenshotType.SCREENSHOT_TYPE_SCORESCREEN, match_id, user_id, slotIndexInLobby, LobbyCreationTime);
+								S3CredentialManager.PresignedUpload? replayUpload = await S3CredentialManager.GetPresignedUpload(EMetadataFileType.FILE_TYPE_REPLAY, EScreenshotType.NONE, match_id, user_id, slotIndexInLobby, LobbyCreationTime);
+
+								result.screenshot_url = screenshotUpload?.Url ?? String.Empty;
+								result.screenshot_upload_confirmation_token = screenshotUpload?.ConfirmationToken ?? String.Empty;
+								result.replay_url = replayUpload?.Url ?? String.Empty;
+								result.replay_upload_confirmation_token = replayUpload?.ConfirmationToken ?? String.Empty;
 
 								// store in DB
 								await using var db = await _dbFactory.CreateDbContextAsync();

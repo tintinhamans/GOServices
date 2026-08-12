@@ -19,7 +19,6 @@
 using GenOnlineService;
 using GenOnlineService.Controllers;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Query;
 using System;
@@ -28,6 +27,7 @@ using System.Linq.Expressions;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 
 public class MatchHistoryEntry
@@ -224,6 +224,15 @@ namespace Database
 	// TODO_EFCORE: Consider moving to zero-serialization model
 	public static class MatchHistory
 	{
+		private static readonly SemaphoreSlim[] s_memberSlotUpdateLocks =
+			Enumerable.Range(0, 256).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+
+		private static SemaphoreSlim GetMemberSlotUpdateLock(ulong matchId, int slotIndex)
+		{
+			int index = (HashCode.Combine(matchId, slotIndex) & Int32.MaxValue) % s_memberSlotUpdateLocks.Length;
+			return s_memberSlotUpdateLocks[index];
+		}
+
 		private static readonly Expression<Func<MatchHistoryEntry, string?>>[] _slotSelectors =
 	{
 			m => m.MemberSlot0,
@@ -338,40 +347,49 @@ namespace Database
 			if (slotIndex < 0 || slotIndex > 7)
 				return;
 
+			SemaphoreSlim updateLock = GetMemberSlotUpdateLock(matchId, slotIndex);
+			await updateLock.WaitAsync();
 			try
 			{
-				// 1. Load JSON for this slot
-				string? json = await _getMemberSlot(db, (long)matchId, slotIndex);
-				if (string.IsNullOrEmpty(json))
-					return;
+				try
+				{
+					// 1. Load JSON for this slot
+					string? json = await _getMemberSlot(db, (long)matchId, slotIndex);
+					if (string.IsNullOrEmpty(json))
+						return;
 
-				// 2. Deserialize
-				MatchdataMemberModel? modelNullable = JsonSerializer.Deserialize<MatchdataMemberModel?>(json);
-				if (modelNullable == null)
-					return;
+					// 2. Deserialize
+					MatchdataMemberModel? modelNullable = JsonSerializer.Deserialize<MatchdataMemberModel?>(json);
+					if (modelNullable == null)
+						return;
 
-				// 3. Update fields
-				MatchdataMemberModel model = modelNullable.Value;
-				model.side = side;
-				model.buildings_built = buildingsBuilt;
-				model.buildings_killed = buildingsKilled;
-				model.buildings_lost = buildingsLost;
-				model.units_built = unitsBuilt;
-				model.units_killed = unitsKilled;
-				model.units_lost = unitsLost;
-				model.total_money = totalMoney;
-				model.won = won;
+					// 3. Update fields
+					MatchdataMemberModel model = modelNullable.Value;
+					model.side = side;
+					model.buildings_built = buildingsBuilt;
+					model.buildings_killed = buildingsKilled;
+					model.buildings_lost = buildingsLost;
+					model.units_built = unitsBuilt;
+					model.units_killed = unitsKilled;
+					model.units_lost = unitsLost;
+					model.total_money = totalMoney;
+					model.won = won;
 
-				// 4. Serialize back
-				string updatedJson = JsonSerializer.Serialize(model);
+					// 4. Serialize back
+					string updatedJson = JsonSerializer.Serialize(model);
 
-				// 5. Update DB (single SQL UPDATE)
-				await _updateMemberSlot(db, (long)matchId, slotIndex, updatedJson);
+					// 5. Update DB (single SQL UPDATE)
+					await _updateMemberSlot(db, (long)matchId, slotIndex, updatedJson);
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"[ERROR] CommitPlayerOutcome failed: {ex.Message}");
+					SentrySdk.CaptureException(ex);
+				}
 			}
-			catch (Exception ex)
+			finally
 			{
-				Console.WriteLine($"[ERROR] CommitPlayerOutcome failed: {ex.Message}");
-				SentrySdk.CaptureException(ex);
+				updateLock.Release();
 			}
 		}
 
@@ -962,66 +980,91 @@ namespace Database
 		}
 
 		// METADATA
-		private static Expression<Func<SetPropertyCalls<MatchHistoryEntry>, SetPropertyCalls<MatchHistoryEntry>>>
-	BuildSlotSetter(int slotIndex, string updatedJson)
-		{
-			return slotIndex switch
-			{
-				0 => s => s.SetProperty(m => m.MemberSlot0, updatedJson),
-				1 => s => s.SetProperty(m => m.MemberSlot1, updatedJson),
-				2 => s => s.SetProperty(m => m.MemberSlot2, updatedJson),
-				3 => s => s.SetProperty(m => m.MemberSlot3, updatedJson),
-				4 => s => s.SetProperty(m => m.MemberSlot4, updatedJson),
-				5 => s => s.SetProperty(m => m.MemberSlot5, updatedJson),
-				6 => s => s.SetProperty(m => m.MemberSlot6, updatedJson),
-				7 => s => s.SetProperty(m => m.MemberSlot7, updatedJson),
-				_ => throw new ArgumentOutOfRangeException(nameof(slotIndex))
-			};
-		}
-
-
-		public static async Task AttachMatchHistoryMetadata(
+		public static async Task<bool> AttachMatchHistoryMetadata(
 	AppDbContext db,
 	ulong matchId,
 	int slotIndex,
 	string fileName,
 	EMetadataFileType fileType)
 		{
-			if (matchId == 0 || slotIndex < 0 || slotIndex > 7)
-				return;
+			return await AttachMatchHistoryMetadata(db, matchId, slotIndex, new[] { (fileName, fileType) });
+		}
 
-			// 1. Load JSON for this slot
-			string? json = await _getMemberSlot(db, (long)matchId, slotIndex);
-			if (string.IsNullOrEmpty(json))
-				return;
+		public static async Task<bool> AttachMatchHistoryMetadata(
+	AppDbContext db,
+	ulong matchId,
+	int slotIndex,
+	IReadOnlyCollection<(string FileName, EMetadataFileType FileType)> metadata)
+		{
+			if (matchId == 0 || slotIndex < 0 || slotIndex > 7 || metadata.Count == 0)
+				return false;
 
-			// 2. Deserialize
-			MatchdataMemberModel? modelN = JsonSerializer.Deserialize<MatchdataMemberModel?>(json);
-			if (modelN == null)
-				return;
-
-			MatchdataMemberModel model = modelN.Value;
-
-			// 3. Ensure metadata list exists
-			model.metadata ??= new List<MemberMetadataModel>();
-
-			// 4. Append metadata entry
-			model.metadata.Add(new MemberMetadataModel
+			SemaphoreSlim updateLock = GetMemberSlotUpdateLock(matchId, slotIndex);
+			await updateLock.WaitAsync();
+			try
 			{
-				file_name = fileName,
-				file_type = (EMetadataFileType)fileType
-			});
+				return await AttachMatchHistoryMetadataCore(db, matchId, slotIndex, metadata);
+			}
+			finally
+			{
+				updateLock.Release();
+			}
+		}
 
-			// 5. Serialize back
-			string updatedJson = JsonSerializer.Serialize(model);
+		private static Task<int> TryReplaceMemberSlot(AppDbContext db, long matchId, int slotIndex, string originalJson, string updatedJson)
+		{
+			return slotIndex switch
+			{
+				0 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot0 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot0, updatedJson)),
+				1 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot1 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot1, updatedJson)),
+				2 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot2 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot2, updatedJson)),
+				3 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot3 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot3, updatedJson)),
+				4 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot4 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot4, updatedJson)),
+				5 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot5 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot5, updatedJson)),
+				6 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot6 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot6, updatedJson)),
+				7 => db.MatchHistory.Where(m => m.MatchId == matchId && m.MemberSlot7 == originalJson).ExecuteUpdateAsync(s => s.SetProperty(m => m.MemberSlot7, updatedJson)),
+				_ => Task.FromResult(0)
+			};
+		}
 
-			// 6. Build setter expression
-			var setter = BuildSlotSetter(slotIndex, updatedJson);
+		private static async Task<bool> AttachMatchHistoryMetadataCore(
+	AppDbContext db,
+	ulong matchId,
+	int slotIndex,
+	IReadOnlyCollection<(string FileName, EMetadataFileType FileType)> metadata)
+		{
+			// Compare-and-swap prevents JSON updates from being lost across service replicas.
+			for (int attempt = 0; attempt < 5; attempt++)
+			{
+				string? json = await _getMemberSlot(db, (long)matchId, slotIndex);
+				if (string.IsNullOrEmpty(json))
+					return false;
 
-			// 7. Execute update (single SQL UPDATE)
-			await db.MatchHistory
-				.Where(m => m.MatchId == (long)matchId)
-				.ExecuteUpdateAsync(setter);
+				MatchdataMemberModel? modelN = JsonSerializer.Deserialize<MatchdataMemberModel?>(json);
+				if (modelN == null)
+					return false;
+
+				MatchdataMemberModel model = modelN.Value;
+				model.metadata ??= new List<MemberMetadataModel>();
+				bool changed = false;
+				foreach ((string fileName, EMetadataFileType fileType) in metadata)
+				{
+					if (model.metadata.Any(entry => entry.file_name == fileName && entry.file_type == fileType))
+						continue;
+
+					model.metadata.Add(new MemberMetadataModel { file_name = fileName, file_type = fileType });
+					changed = true;
+				}
+
+				if (!changed)
+					return true;
+
+				string updatedJson = JsonSerializer.Serialize(model);
+				if (await TryReplaceMemberSlot(db, (long)matchId, slotIndex, json, updatedJson) == 1)
+					return true;
+			}
+
+			return false;
 		}
 
 		// ELO

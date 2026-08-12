@@ -29,6 +29,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -2411,8 +2412,37 @@ namespace GenOnlineService
 
 	public static class S3CredentialManager
 	{
-		private static AmazonS3Client m_s3client = null;
+		private enum EObjectCheckStatus
+		{
+			Exists,
+			Missing,
+			Unavailable
+		}
+
+		public sealed class PresignedUpload
+		{
+			public string Url { get; init; } = String.Empty;
+			public string ConfirmationToken { get; init; } = String.Empty;
+		}
+
+		public sealed class UploadConfirmationResult
+		{
+			public string UploadId { get; init; } = String.Empty;
+			public string Status { get; init; } = String.Empty;
+			public bool Success { get; init; }
+		}
+
+		private static AmazonS3Client? m_s3client = null;
 		private static bool s_uploadsEnabled = false;
+		private static bool s_requireUploadConfirmation = false;
+		private static int s_urlTtlMinutes = -1;
+		private static int s_confirmationGraceMinutes = 1440;
+		private static int s_reconcileIntervalSeconds = 60;
+		private static int s_reconcileBatchSize = 100;
+		private static int s_reconcileMaxConcurrency = 8;
+		private static string s_bucketName = String.Empty;
+		public static bool ReconciliationEnabled => s_uploadsEnabled && s_requireUploadConfirmation;
+		public static int ReconcileIntervalSeconds => s_reconcileIntervalSeconds;
 
 		public static void Initialize()
 		{
@@ -2422,6 +2452,7 @@ namespace GenOnlineService
 			}
 
 			s_uploadsEnabled = Program.g_Config.GetSection("MatchData").GetValue<bool?>("upload_match_data") ?? false;
+			s_requireUploadConfirmation = Program.g_Config.GetSection("MatchData").GetValue<bool?>("require_upload_confirmation") ?? false;
 
 			// When uploads are disabled, the S3 settings are intentionally optional.
 			if (!s_uploadsEnabled)
@@ -2430,42 +2461,51 @@ namespace GenOnlineService
 				return;
 			}
 
-			GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string client_endpoint);
+			GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string client_endpoint, out string signing_region);
+			s_urlTtlMinutes = TTL;
+			s_bucketName = bucket_name;
+			s_confirmationGraceMinutes = Math.Max(1, Program.g_Config.GetSection("MatchData").GetValue<int?>("confirmation_grace_minutes") ?? 1440);
+			s_reconcileIntervalSeconds = Math.Max(10, Program.g_Config.GetSection("MatchData").GetValue<int?>("reconcile_interval_seconds") ?? 60);
+			s_reconcileBatchSize = Math.Clamp(Program.g_Config.GetSection("MatchData").GetValue<int?>("reconcile_batch_size") ?? 100, 1, 500);
+			s_reconcileMaxConcurrency = Math.Clamp(Program.g_Config.GetSection("MatchData").GetValue<int?>("reconcile_max_concurrency") ?? 8, 1, 32);
 
 			var config = new AmazonS3Config
 			{
 				ServiceURL = client_endpoint,
+				AuthenticationRegion = signing_region,
 				ForcePathStyle = true
 			};
 
 			m_s3client = new AmazonS3Client(access_key, secret_key, config);
 		}
 
-		private static void GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string endpoint)
+		private static void GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string endpoint, out string signing_region)
 		{
 			TTL = -1;
 			access_key = String.Empty;
 			secret_key = String.Empty;
 			bucket_name = String.Empty;
 			endpoint = String.Empty;
+			signing_region = String.Empty;
 
 			if (Program.g_Config == null)
 			{
 				throw new Exception("Config not loaded");
 			}
 
-			IConfigurationSection? turnSettings = Program.g_Config.GetSection("MatchData");
+			IConfigurationSection? matchDataSettings = Program.g_Config.GetSection("MatchData");
 
-			if (turnSettings == null)
+			if (matchDataSettings == null)
 			{
 				throw new Exception("MatchData section missing in config");
 			}
 
-			string? s3_access_key = turnSettings.GetValue<string>("s3_access_key");
-			string? s3_secret_key = turnSettings.GetValue<string>("s3_secret_key");
-			string? s3_bucket_name = turnSettings.GetValue<string>("s3_bucket_name");
-			string? s3_endpoint = turnSettings.GetValue<string>("s3_endpoint");
-			int? s3_url_ttl_minutes = turnSettings.GetValue<int>("s3_url_ttl_minutes");
+			string? s3_access_key = matchDataSettings.GetValue<string>("s3_access_key");
+			string? s3_secret_key = matchDataSettings.GetValue<string>("s3_secret_key");
+			string? s3_bucket_name = matchDataSettings.GetValue<string>("s3_bucket_name");
+			string? s3_endpoint = matchDataSettings.GetValue<string>("s3_endpoint");
+			string? s3_region = matchDataSettings.GetValue<string>("s3_region");
+			int? s3_url_ttl_minutes = matchDataSettings.GetValue<int>("s3_url_ttl_minutes");
 
 			if (s3_access_key == null)
 			{
@@ -2487,9 +2527,14 @@ namespace GenOnlineService
 				throw new Exception("s3_endpoint missing in config");
 			}
 
-			if (s3_url_ttl_minutes == null)
+			if (String.IsNullOrWhiteSpace(s3_region))
 			{
-				throw new Exception("s3_url_ttl_minutes missing in config");
+				throw new Exception("s3_region missing in config");
+			}
+
+			if (s3_url_ttl_minutes == null || s3_url_ttl_minutes <= 0)
+			{
+				throw new Exception("s3_url_ttl_minutes must be greater than zero");
 			}
 
 			TTL = (int)s3_url_ttl_minutes;
@@ -2497,21 +2542,264 @@ namespace GenOnlineService
 			secret_key = s3_secret_key;
 			bucket_name = s3_bucket_name;
 			endpoint = s3_endpoint;
+			signing_region = s3_region;
 		}
 
-		public static async Task<string?> GetPresignedURL(EMetadataFileType fileType, EScreenshotType screenshotTypeIfScreenshot, UInt64 matchID, Int64 userID, int slotIndex, DateTime matchStartTime)
+		private static string Base64UrlEncode(ReadOnlySpan<byte> value)
 		{
-			if (!s_uploadsEnabled || m_s3client == null)
+			return Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+		}
+
+		private static byte[] Base64UrlDecode(string value)
+		{
+			string padded = value.Replace('-', '+').Replace('_', '/');
+			padded = padded.PadRight(padded.Length + ((4 - padded.Length % 4) % 4), '=');
+			return Convert.FromBase64String(padded);
+		}
+
+		private static string CreateConfirmationToken(string uploadId, out byte[] tokenHash)
+		{
+			byte[] secret = RandomNumberGenerator.GetBytes(32);
+			tokenHash = SHA256.HashData(secret);
+			return $"{uploadId}.{Base64UrlEncode(secret)}";
+		}
+
+		private static bool TryReadConfirmationToken(string token, out string uploadId, out byte[] secretHash)
+		{
+			uploadId = String.Empty;
+			secretHash = Array.Empty<byte>();
+			if (token.Length != 76)
+				return false;
+
+			try
+			{
+				string[] parts = token.Split('.');
+				if (parts.Length != 2 || !Guid.TryParseExact(parts[0], "N", out Guid parsedId))
+				{
+					return false;
+				}
+
+				byte[] secret = Base64UrlDecode(parts[1]);
+				if (secret.Length != 32)
+					return false;
+
+				uploadId = parsedId.ToString("N");
+				secretHash = SHA256.HashData(secret);
+				return true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+
+		private static async Task<EObjectCheckStatus> CheckUploadedObject(PendingMatchUpload upload)
+		{
+			try
+			{
+				var metadata = await m_s3client!.GetObjectMetadataAsync(new GetObjectMetadataRequest
+				{
+					BucketName = upload.Bucket,
+					Key = upload.ObjectKey
+				});
+
+				return metadata.ContentLength > 0 ? EObjectCheckStatus.Exists : EObjectCheckStatus.Missing;
+			}
+			catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+			{
+				return EObjectCheckStatus.Missing;
+			}
+			catch (AmazonS3Exception)
+			{
+				return EObjectCheckStatus.Unavailable;
+			}
+		}
+
+		private static async Task<EObjectCheckStatus[]> CheckUploadedObjects(IReadOnlyList<PendingMatchUpload> uploads)
+		{
+			using var concurrencyGate = new SemaphoreSlim(s_reconcileMaxConcurrency);
+			Task<EObjectCheckStatus>[] checks = uploads.Select(async upload =>
+			{
+				await concurrencyGate.WaitAsync();
+				try
+				{
+					return await CheckUploadedObject(upload);
+				}
+				finally
+				{
+					concurrencyGate.Release();
+				}
+			}).ToArray();
+
+			return await Task.WhenAll(checks);
+		}
+
+		public static async Task<IReadOnlyList<UploadConfirmationResult>> ConfirmUploads(IReadOnlyCollection<string> confirmationTokens, Int64 userID)
+		{
+			if (!s_requireUploadConfirmation || m_s3client == null || confirmationTokens.Count == 0 || confirmationTokens.Count > 16)
+			{
+				return Array.Empty<UploadConfirmationResult>();
+			}
+
+			var parsedTokens = confirmationTokens.Distinct(StringComparer.Ordinal)
+				.Select(token =>
+				{
+					bool valid = TryReadConfirmationToken(token, out string uploadId, out byte[] secretHash);
+					return (Valid: valid, UploadId: uploadId, SecretHash: secretHash);
+				})
+				.ToArray();
+
+			using var scope = ServiceLocator.Services.CreateScope();
+			var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+			await using var db = await factory.CreateDbContextAsync();
+
+			string[] uploadIds = parsedTokens.Where(token => token.Valid).Select(token => token.UploadId).ToArray();
+			Dictionary<string, PendingMatchUpload> uploadsById = await db.PendingMatchUploads
+				.Where(upload => uploadIds.Contains(upload.UploadId))
+				.ToDictionaryAsync(upload => upload.UploadId);
+
+			DateTime utcNow = DateTime.UtcNow;
+			var results = new List<UploadConfirmationResult>(parsedTokens.Length);
+			var uploadsToCheck = new List<PendingMatchUpload>();
+			foreach (var parsed in parsedTokens)
+			{
+				if (!parsed.Valid || !uploadsById.TryGetValue(parsed.UploadId, out PendingMatchUpload? upload)
+					|| upload.UserId != userID || !CryptographicOperations.FixedTimeEquals(parsed.SecretHash, upload.TokenHash))
+				{
+					results.Add(new UploadConfirmationResult { UploadId = parsed.UploadId, Status = "invalid", Success = false });
+					continue;
+				}
+
+				if (upload.ConfirmedUtc != null)
+				{
+					results.Add(new UploadConfirmationResult { UploadId = upload.UploadId, Status = "already_confirmed", Success = true });
+				}
+				else if (upload.ConfirmationExpiresUtc < utcNow)
+				{
+					results.Add(new UploadConfirmationResult { UploadId = upload.UploadId, Status = "expired", Success = false });
+				}
+				else
+				{
+					uploadsToCheck.Add(upload);
+				}
+			}
+
+			EObjectCheckStatus[] objectStatuses = await CheckUploadedObjects(uploadsToCheck);
+			var verifiedUploads = new List<PendingMatchUpload>();
+			for (int i = 0; i < uploadsToCheck.Count; i++)
+			{
+				PendingMatchUpload upload = uploadsToCheck[i];
+				if (objectStatuses[i] != EObjectCheckStatus.Exists)
+				{
+					string status = objectStatuses[i] == EObjectCheckStatus.Missing ? "not_uploaded" : "storage_unavailable";
+					results.Add(new UploadConfirmationResult { UploadId = upload.UploadId, Status = status, Success = false });
+					continue;
+				}
+				verifiedUploads.Add(upload);
+			}
+
+			foreach (var slotUploads in verifiedUploads.GroupBy(upload => (upload.MatchId, upload.SlotIndex)))
+			{
+				PendingMatchUpload[] uploads = slotUploads.ToArray();
+				bool attached = await Database.MatchHistory.AttachMatchHistoryMetadata(db,
+					(ulong)slotUploads.Key.MatchId,
+					slotUploads.Key.SlotIndex,
+					uploads.Select(upload => (upload.FileName, upload.FileType)).ToArray());
+				if (!attached)
+				{
+					results.AddRange(uploads.Select(upload => new UploadConfirmationResult
+					{
+						UploadId = upload.UploadId,
+						Status = "metadata_unavailable",
+						Success = false
+					}));
+					continue;
+				}
+
+				foreach (PendingMatchUpload upload in uploads)
+				{
+					upload.ConfirmedUtc = utcNow;
+					results.Add(new UploadConfirmationResult { UploadId = upload.UploadId, Status = "confirmed", Success = true });
+				}
+			}
+
+			await db.SaveChangesAsync();
+			return results;
+		}
+
+		public static async Task ReconcilePendingUploads()
+		{
+			if (!ReconciliationEnabled || m_s3client == null)
+				return;
+
+			using var scope = ServiceLocator.Services.CreateScope();
+			var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+			await using var db = await factory.CreateDbContextAsync();
+
+			DateTime utcNow = DateTime.UtcNow;
+			List<PendingMatchUpload> pending = await db.PendingMatchUploads
+				.Where(upload => upload.ConfirmedUtc == null
+					&& upload.NextCheckUtc <= utcNow
+					&& upload.ConfirmationExpiresUtc >= utcNow)
+				.OrderBy(upload => upload.NextCheckUtc)
+				.Take(s_reconcileBatchSize)
+				.ToListAsync();
+
+			EObjectCheckStatus[] objectStatuses = await CheckUploadedObjects(pending);
+			var uploadedObjects = new List<PendingMatchUpload>();
+			for (int i = 0; i < pending.Count; i++)
+			{
+				PendingMatchUpload upload = pending[i];
+				if (objectStatuses[i] == EObjectCheckStatus.Exists)
+				{
+					uploadedObjects.Add(upload);
+					continue;
+				}
+
+				upload.CheckAttempts++;
+				int retryMinutes = Math.Min(30, 1 << Math.Min(upload.CheckAttempts, 5));
+				upload.NextCheckUtc = utcNow.AddMinutes(retryMinutes);
+			}
+
+			foreach (var slotUploads in uploadedObjects.GroupBy(upload => (upload.MatchId, upload.SlotIndex)))
+			{
+				PendingMatchUpload[] uploads = slotUploads.ToArray();
+				bool attached = await Database.MatchHistory.AttachMatchHistoryMetadata(db,
+					(ulong)slotUploads.Key.MatchId,
+					slotUploads.Key.SlotIndex,
+					uploads.Select(upload => (upload.FileName, upload.FileType)).ToArray());
+				if (attached)
+				{
+					foreach (PendingMatchUpload upload in uploads)
+						upload.ConfirmedUtc = utcNow;
+				}
+				else
+				{
+					foreach (PendingMatchUpload upload in uploads)
+					{
+						upload.CheckAttempts++;
+						upload.NextCheckUtc = utcNow.AddMinutes(2);
+					}
+				}
+			}
+
+			await db.PendingMatchUploads
+				.Where(upload => upload.ConfirmationExpiresUtc < utcNow.AddDays(-1))
+				.ExecuteDeleteAsync();
+			await db.SaveChangesAsync();
+		}
+
+		public static async Task<PresignedUpload?> GetPresignedUpload(EMetadataFileType fileType, EScreenshotType screenshotTypeIfScreenshot, UInt64 matchID, Int64 userID, int slotIndex, DateTime matchStartTime)
+		{
+			if (!s_uploadsEnabled || m_s3client == null || matchID == 0 || matchID > (ulong)Int64.MaxValue || userID <= 0 || slotIndex < 0 || slotIndex > 7)
 			{
 				return null;
 			}
 
-			GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string client_endpoint);
-			TimeSpan expiresIn = TimeSpan.FromMinutes(TTL);
+			TimeSpan expiresIn = TimeSpan.FromMinutes(s_urlTtlMinutes);
 
 			DateTime utcNow = DateTime.UtcNow;
-			int hour = utcNow.Hour;
-			int minute = utcNow.Minute;
+			string uniqueSuffix = $"{utcNow:yyyyMMddTHHmmssfffZ}_{Guid.NewGuid():N}";
 
 			string strPerMatchUserIDKey = Helpers.ComputeMD5Hash(String.Format("{0}_{1}", matchID, userID));
 			string strFileName = null;
@@ -2523,8 +2811,6 @@ namespace GenOnlineService
 			if (fileType == EMetadataFileType.FILE_TYPE_SCREENSHOT)
 			{
 				strContentType = "image/jpeg";
-				fileType = EMetadataFileType.FILE_TYPE_SCREENSHOT;
-
 				string screenshotTypePrefix = "screenshot";
 				if (screenshotTypeIfScreenshot == EScreenshotType.SCREENSHOT_TYPE_LOADSCREEN)
 				{
@@ -2539,15 +2825,13 @@ namespace GenOnlineService
 					screenshotTypePrefix = "scorescreen";
 				}
 
-				strFileName = String.Format("screenshot_{0}_{1}_{2}.jpg", screenshotTypePrefix, hour, minute);
+				strFileName = $"screenshot_{screenshotTypePrefix}_{uniqueSuffix}.jpg";
 				strFolderPrefix = "screenshots";
 			}
 			else if (fileType == EMetadataFileType.FILE_TYPE_REPLAY)
 			{
 				strContentType = "application/octet-stream";
-				fileType = EMetadataFileType.FILE_TYPE_REPLAY;
-
-				strFileName = String.Format("match_{0}_user_{1}_replay.rep", matchID, strPerMatchUserIDKey);
+				strFileName = $"replay_{uniqueSuffix}.rep";
 				strFolderPrefix = "replays";
 			}
 
@@ -2556,25 +2840,57 @@ namespace GenOnlineService
 				return null;
 			}
 
-			string objectKey = String.Format("{3}/{4}/{5}/{6}/match_{0}/user_{1}/{2}", matchID, strPerMatchUserIDKey, strFileName, strFolderPrefix, matchStartTime.Year, matchStartTime.Month, matchStartTime.Day);
+			DateTime matchStartUtc = matchStartTime.ToUniversalTime();
+			string objectKey = $"{strFolderPrefix}/{matchStartUtc:yyyy/MM/dd}/match_{matchID}/user_{strPerMatchUserIDKey}/{strFileName}";
 
 			var request = new GetPreSignedUrlRequest
 			{
-				BucketName = bucket_name,
+				BucketName = s_bucketName,
 				Key = objectKey,
 				Verb = HttpVerb.PUT,
 				Expires = DateTime.UtcNow.Add(expiresIn),
 				ContentType = strContentType
 			};
 
-			// anytime we get an S3 uri, register the metadata
-			using var scope = ServiceLocator.Services.CreateScope();
-			var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
-			await using var db = await factory.CreateDbContextAsync();
+			string url = await m_s3client.GetPreSignedURLAsync(request);
+			string confirmationToken = String.Empty;
 
-			await Database.MatchHistory.AttachMatchHistoryMetadata(db, matchID, slotIndex, strFileName, fileType);
+			if (s_requireUploadConfirmation)
+			{
+				string uploadId = Guid.NewGuid().ToString("N");
+				confirmationToken = CreateConfirmationToken(uploadId, out byte[] tokenHash);
+				DateTime uploadExpiresUtc = utcNow.Add(expiresIn);
 
-			return await m_s3client.GetPreSignedURLAsync(request);
+				using var scope = ServiceLocator.Services.CreateScope();
+				var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+				await using var db = await factory.CreateDbContextAsync();
+				db.PendingMatchUploads.Add(new PendingMatchUpload
+				{
+					UploadId = uploadId,
+					TokenHash = tokenHash,
+					UserId = userID,
+					MatchId = (long)matchID,
+					SlotIndex = slotIndex,
+					Bucket = s_bucketName,
+					ObjectKey = objectKey,
+					FileName = strFileName,
+					FileType = fileType,
+					CreatedUtc = utcNow,
+					UploadExpiresUtc = uploadExpiresUtc,
+					ConfirmationExpiresUtc = uploadExpiresUtc.AddMinutes(s_confirmationGraceMinutes),
+					NextCheckUtc = utcNow.AddSeconds(s_reconcileIntervalSeconds)
+				});
+				await db.SaveChangesAsync();
+			}
+			else
+			{
+				using var scope = ServiceLocator.Services.CreateScope();
+				var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+				await using var db = await factory.CreateDbContextAsync();
+				await Database.MatchHistory.AttachMatchHistoryMetadata(db, matchID, slotIndex, strFileName, fileType);
+			}
+
+			return new PresignedUpload { Url = url, ConfirmationToken = confirmationToken };
 		}
 	}
 
@@ -2583,11 +2899,12 @@ namespace GenOnlineService
 	{
 		private static ConcurrentDictionary<Int64, string> g_DictTURNUsernames = new();
 
-		private static void GetTURNConfig(out int TTL, out string token, out string key, out bool bShouldInvalidateTokensAutomatically)
+		private static void GetTURNConfig(out int TTL, out string token, out string key, out string apiBaseUrl, out bool bShouldInvalidateTokensAutomatically)
 		{
 			TTL = -1;
 			token = String.Empty;
 			key = String.Empty;
+			apiBaseUrl = String.Empty;
 
 			if (Program.g_Config == null)
 			{
@@ -2603,6 +2920,7 @@ namespace GenOnlineService
 
 			string? turn_key = turnSettings.GetValue<string>("key");
 			string? turn_token = turnSettings.GetValue<string>("token");
+			string? api_base_url = turnSettings.GetValue<string>("api_base_url");
 			int? token_ttl = turnSettings.GetValue<int>("token_ttl");
 			bool? automatic_token_invalidate = turnSettings.GetValue<bool>("automatic_token_invalidate");
 
@@ -2614,6 +2932,11 @@ namespace GenOnlineService
 			if (turn_token == null)
 			{
 				throw new Exception("turn_token missing in config");
+			}
+
+			if (!Uri.TryCreate(api_base_url, UriKind.Absolute, out _))
+			{
+				throw new Exception("TURN api_base_url missing or invalid in config");
 			}
 
 			if (token_ttl == null)
@@ -2629,6 +2952,7 @@ namespace GenOnlineService
 			TTL = (int)token_ttl;
 			token = turn_token;
 			key = turn_key;
+			apiBaseUrl = api_base_url.TrimEnd('/');
 			bShouldInvalidateTokensAutomatically = (bool)automatic_token_invalidate;
 		}
 
@@ -2639,7 +2963,7 @@ namespace GenOnlineService
 			await Task.Delay(1);
 			return fakeCreds;
 #endif
-			GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out bool bShouldInvalidateTokensAutomatically);
+			GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out string TurnApiBaseUrl, out bool bShouldInvalidateTokensAutomatically);
 
 			// we should only have 1 turn credential at a time... clean it up
 			if (g_DictTURNUsernames.ContainsKey(userID))
@@ -2698,7 +3022,7 @@ namespace GenOnlineService
 				try
 				{
 					Console.WriteLine("Start req turn credentials at {0}", Environment.TickCount);
-					string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/generate-ice-servers", TurnKey);
+					string strURI = $"{TurnApiBaseUrl}/{Uri.EscapeDataString(TurnKey)}/credentials/generate-ice-servers";
 					HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
 
 					if (response.IsSuccessStatusCode)
@@ -2748,7 +3072,7 @@ namespace GenOnlineService
             return;
 #endif
 
-            GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out bool bShouldInvalidateTokensAutomatically);
+            GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out string TurnApiBaseUrl, out bool bShouldInvalidateTokensAutomatically);
 
 			if (!bShouldInvalidateTokensAutomatically)
 			{
@@ -2808,7 +3132,7 @@ namespace GenOnlineService
 					client.DefaultRequestHeaders.Add("Accept", "application/json");
 					try
 					{
-						string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/{1}/revoke", TurnKey, strTURNUsername);
+						string strURI = $"{TurnApiBaseUrl}/{Uri.EscapeDataString(TurnKey)}/credentials/{Uri.EscapeDataString(strTURNUsername)}/revoke";
 						HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
 					}
 					catch
@@ -2966,11 +3290,12 @@ namespace GenOnlineService
 	public class WebSocketMessage_Probe : WebSocketMessage
 	{
 		public string url { get; set; } = String.Empty;
+		public string upload_confirmation_token { get; set; } = String.Empty;
 	}
-
 	public class WebSocketMessage_StartMatch : WebSocketMessage
 	{
 		public string screenshot_url { get; set; } = String.Empty;
+		public string screenshot_upload_confirmation_token { get; set; } = String.Empty;
 	}
 
 	public abstract class WebSocketMessage

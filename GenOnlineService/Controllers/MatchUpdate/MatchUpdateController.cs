@@ -16,8 +16,6 @@
 **    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-using Amazon.S3;
-using Amazon.S3.Model;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
