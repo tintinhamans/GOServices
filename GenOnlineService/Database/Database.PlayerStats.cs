@@ -69,15 +69,6 @@ namespace Database
 	);
 
 
-		private static readonly Func<AppDbContext, long, Task<string?>> _getUserStats =
-	EF.CompileAsyncQuery(
-		(AppDbContext db, long userId) =>
-			db.UserStats
-			  .Where(s => s.UserId == userId)
-			  .Select(s => s.Stats)
-			  .FirstOrDefault()
-	);
-
 		public static async Task<PlayerStats> GetPlayerStats(
 	AppDbContext db,
 	long userId)
@@ -130,65 +121,89 @@ namespace Database
 			return ps;
 		}
 
-
-		public static async Task UpdatePlayerStat(
-	AppDbContext db,
-	long userId,
-	int statId,
-	int statVal)
+		public static async Task<Dictionary<long, PlayerStats>> GetPlayerStatsBatchFromDatabase(
+			AppDbContext db,
+			IReadOnlyCollection<long> userIds,
+			CancellationToken cancellationToken = default)
 		{
-			try
+			long[] distinctUserIds = userIds.Distinct().ToArray();
+			if (distinctUserIds.Length == 0)
 			{
-				// 1. Load existing JSON (if any)
-				string? json = await _getUserStats(db, userId);
+				return new Dictionary<long, PlayerStats>();
+			}
 
-				Dictionary<string, int> stats;
-
-				if (string.IsNullOrEmpty(json))
+			var users = await db.Users
+				.AsNoTracking()
+				.Where(user => distinctUserIds.Contains(user.ID))
+				.Select(user => new
 				{
-					// No row exists → create new dictionary
-					stats = new Dictionary<string, int>();
-				}
-				else
+					user.ID,
+					user.EloRating,
+					user.MonthlyEloRating,
+					user.EloNumberOfMatches
+				})
+				.ToListAsync(cancellationToken);
+
+			Dictionary<long, string> storedStats = await db.UserStats
+				.AsNoTracking()
+				.Where(entry => distinctUserIds.Contains(entry.UserId))
+				.ToDictionaryAsync(entry => entry.UserId, entry => entry.Stats, cancellationToken);
+
+			Dictionary<long, PlayerStats> result = new(users.Count);
+			foreach (var user in users)
+			{
+				PlayerStats playerStats = new(
+					user.ID,
+					user.EloRating,
+					user.EloNumberOfMatches,
+					user.MonthlyEloRating);
+
+				if (storedStats.TryGetValue(user.ID, out string? json) && !string.IsNullOrWhiteSpace(json))
 				{
-					// Deserialize existing stats
-					stats = JsonSerializer.Deserialize<Dictionary<string, int>>(json)
-							?? new Dictionary<string, int>();
-				}
-
-				// 2. Update the stat
-				stats[statId.ToString()] = statVal;
-
-				// 3. Serialize back
-				string updatedJson = JsonSerializer.Serialize(stats);
-
-				// 4. Check if row exists
-				bool exists = json != null;
-
-				if (!exists)
-				{
-					// INSERT
-					db.UserStats.Add(new UserStatsEntry
+					Dictionary<int, int>? stats = JsonSerializer.Deserialize<Dictionary<int, int>>(json);
+					if (stats != null)
 					{
-						UserId = userId,
-						Stats = updatedJson
-					});
-
-					await db.SaveChangesAsync();
-					return;
+						foreach ((int statId, int statValue) in stats)
+						{
+							try
+							{
+								playerStats.ProcessFromDB((EStatIndex)statId, statValue);
+							}
+							catch (ArgumentOutOfRangeException)
+							{
+								// Old rows may contain non-integer/unsupported legacy fields.
+							}
+						}
+					}
 				}
 
-				// 5. UPDATE using ExecuteUpdateAsync (fast, no tracking)
-				await db.UserStats
-					.Where(s => s.UserId == userId)
-					.ExecuteUpdateAsync(s => s
-						.SetProperty(x => x.Stats, updatedJson));
+				result[user.ID] = playerStats;
 			}
-			catch (Exception ex)
+
+			return result;
+		}
+
+		public static async Task UpdatePlayerStats(
+			AppDbContext db,
+			long userId,
+			IReadOnlyDictionary<int, int> statUpdates,
+			CancellationToken cancellationToken = default)
+		{
+			if (statUpdates.Count == 0)
 			{
-				Console.WriteLine($"[ERROR] UpdatePlayerStat failed: {ex.Message}");
-				SentrySdk.CaptureException(ex);
+				return;
 			}
+
+			string statsPatch = JsonSerializer.Serialize(statUpdates);
+
+			// Apply the complete client patch in a single, row-atomic statement. This preserves
+			// omitted legacy keys without the read/deserialize/write cycle that previously ran
+			// once for every stat and allowed concurrent requests to overwrite each other.
+			await db.Database.ExecuteSqlInterpolatedAsync($@"
+INSERT INTO user_stats_v2 (user_id, stats)
+VALUES ({userId}, {statsPatch})
+ON DUPLICATE KEY UPDATE
+stats = JSON_MERGE_PATCH(COALESCE(stats, '{{}}'), VALUES(stats));", cancellationToken);
 		}
 
 	}

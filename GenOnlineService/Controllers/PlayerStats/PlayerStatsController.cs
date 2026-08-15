@@ -41,20 +41,20 @@ namespace GenOnlineService.Controllers
 		public PlayerStats? stats { get; set; } = null;
 	}
 
-    public class RouteHandler_GET_PlayerStatsBatch_Result : APIResult
-    {
-        public override Type GetReturnType()
-        {
-            return this.GetType();
-        }
+	public class RouteHandler_GET_PlayerStatsBatch_Result : APIResult
+	{
+		public override Type GetReturnType()
+		{
+			return this.GetType();
+		}
+		public List<PlayerStats> stats { get; set; } = new();
+		public List<Int64> missing_user_ids { get; set; } = new();
+	}
 
-        public List<PlayerStats?> stats { get; set; } = null;
-    }
-
-    public class RouteHandler_GET_PlayerStatsBatch_Input
-    {
-        public List<Int64> user_ids { get; set; } = null;
-    }
+	public class RouteHandler_GET_PlayerStatsBatch_Input
+	{
+		public List<Int64>? user_ids { get; set; }
+	}
 
     public class RouteHandler_PUT_PlayerStats_Result : APIResult
 	{
@@ -64,6 +64,54 @@ namespace GenOnlineService.Controllers
 		}
 
 		public PlayerStats? stats { get; set; } = null;
+	}
+
+	internal static class PlayerStatsUpdateParser
+	{
+		internal const int MaxPayloadEntries = (int)EStatIndex.LASTLADDERHOST + 1;
+
+		internal static Dictionary<int, int> ParseIntegerUpdates(string jsonData)
+		{
+			using JsonDocument document = JsonDocument.Parse(jsonData);
+			if (document.RootElement.ValueKind != JsonValueKind.Array)
+			{
+				throw new JsonException("Player stats payload must be an array.");
+			}
+
+			if (document.RootElement.GetArrayLength() > MaxPayloadEntries)
+			{
+				throw new JsonException($"Player stats payload exceeds {MaxPayloadEntries} entries.");
+			}
+
+			Dictionary<int, int> updates = new();
+			int statId = 0;
+			foreach (JsonElement element in document.RootElement.EnumerateArray())
+			{
+				if (element.ValueKind == JsonValueKind.Number
+					&& element.TryGetInt32(out int statValue)
+					&& IsSupportedIntegerStat(statId))
+				{
+					updates[statId] = statValue;
+				}
+
+				statId++;
+			}
+
+			return updates;
+		}
+
+		private static bool IsSupportedIntegerStat(int statId)
+		{
+			if (statId < 0 || statId >= MaxPayloadEntries)
+			{
+				return false;
+			}
+
+			EStatIndex stat = (EStatIndex)statId;
+			return stat != EStatIndex.OPTIONS
+				&& stat != EStatIndex.SYSTEM_SPEC
+				&& stat != EStatIndex.LASTLADDERHOST;
+		}
 	}
 
 	[ApiController]
@@ -122,125 +170,163 @@ namespace GenOnlineService.Controllers
 			return result;
 		}
 
-        // Bulk endpoint
-        [HttpPost("Batch")]
-        [Authorize(Roles = "GameClient,ChatClient,GameLauncher,Monitor")]
-        public async Task<APIResult> PostBatched()
-        {
-            RouteHandler_GET_PlayerStatsBatch_Result result = new RouteHandler_GET_PlayerStatsBatch_Result();
-            result.stats = new List<PlayerStats>(); // return 0s by default, incase client tries to use it
+		private const int MaxBatchUsers = 4096;
 
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
+		// Bulk endpoint
+		[HttpPost("Batch")]
+		[Authorize(Roles = "GameClient,ChatClient,GameLauncher,Monitor")]
+		public async Task<APIResult> PostBatched()
+		{
+			RouteHandler_GET_PlayerStatsBatch_Result result = new();
 
-            using (var reader = new StreamReader(HttpContext.Request.Body))
+			var options = new JsonSerializerOptions
 			{
-				string jsonData = await reader.ReadToEndAsync();
+				PropertyNameCaseInsensitive = true
+			};
 
-                RouteHandler_GET_PlayerStatsBatch_Input inputData = JsonSerializer.Deserialize<RouteHandler_GET_PlayerStatsBatch_Input>(jsonData, options);
+			RouteHandler_GET_PlayerStatsBatch_Input? inputData;
+			try
+			{
+				inputData = await JsonSerializer.DeserializeAsync<RouteHandler_GET_PlayerStatsBatch_Input>(
+					HttpContext.Request.Body,
+					options,
+					HttpContext.RequestAborted);
+			}
+			catch (JsonException ex)
+			{
+				_logger.LogWarning(ex, "Rejected malformed player stats batch request");
+				Response.StatusCode = (int)HttpStatusCode.BadRequest;
+				return result;
+			}
 
-                // process each user
-                foreach (Int64 userID in inputData.user_ids)
-                {
-					// get all sessions for this user
-					SharedUserData userData = WebSocketManager.GetSharedDataForUser(userID);
+			if (inputData?.user_ids == null || inputData.user_ids.Count > MaxBatchUsers)
+			{
+				Response.StatusCode = (int)HttpStatusCode.BadRequest;
+				return result;
+			}
 
-					// NOTE: Batch is only supported for ONLINE users, DB will never be looked up
-					if (userData != null)
+			List<Int64> inputUserIds = inputData.user_ids;
+			List<Int64> requestedUserIds = inputUserIds.Distinct().ToList();
+			Dictionary<Int64, PlayerStats> statsByUser = new(requestedUserIds.Count);
+			List<Int64> usersMissingFromCache = new();
+
+			foreach (Int64 userID in requestedUserIds)
+			{
+				SharedUserData? userData = WebSocketManager.GetSharedDataForUser(userID);
+				if (userData?.GameStats != null)
+				{
+					statsByUser[userID] = userData.GameStats;
+				}
+				else
+				{
+					usersMissingFromCache.Add(userID);
+				}
+			}
+
+			try
+			{
+				if (usersMissingFromCache.Count > 0)
+				{
+					await using var db = await _dbFactory.CreateDbContextAsync(HttpContext.RequestAborted);
+					Dictionary<Int64, PlayerStats> databaseStats =
+						await Database.UserStats.GetPlayerStatsBatchFromDatabase(
+							db,
+							usersMissingFromCache,
+							HttpContext.RequestAborted);
+
+					foreach ((Int64 userID, PlayerStats stats) in databaseStats)
 					{
-						if (userData.GameStats != null)
-						{
-							result.stats.Add(userData.GameStats);
-
-						}
+						statsByUser[userID] = stats;
 					}
 				}
-            }
+			}
+			catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Failed to load fallback player stats for batch request");
+				SentrySdk.CaptureException(ex);
+				Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+				return result;
+			}
 
-            return result;
-        }
+			foreach (Int64 userID in inputUserIds)
+			{
+				if (statsByUser.TryGetValue(userID, out PlayerStats? stats))
+				{
+					result.stats.Add(stats);
+				}
+			}
+
+			result.missing_user_ids = requestedUserIds
+				.Where(userID => !statsByUser.ContainsKey(userID))
+				.ToList();
+
+			return result;
+		}
 
         [HttpPut]
 		[Authorize(Roles = "GameClient")]
 		public async Task<APIResult> Put()
 		{
-			RouteHandler_PUT_PlayerStats_Result result = new RouteHandler_PUT_PlayerStats_Result();
+			RouteHandler_PUT_PlayerStats_Result result = new();
+			Int64 userId = TokenHelper.GetUserID(this);
+			EUserSessionType sessionType = TokenHelper.GetSessionType(this);
 
-			using (var reader = new StreamReader(HttpContext.Request.Body))
+			if (userId == -1)
 			{
-				string jsonData = await reader.ReadToEndAsync();
-				var options = new JsonSerializerOptions
-				{
-					PropertyNameCaseInsensitive = true
-				};
+				Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+				return result;
+			}
 
-				try
-				{
-					Int64 user_id = TokenHelper.GetUserID(this);
+			if (!SessionHelpers.SessionTypeHasAccessTo(sessionType, ESessionAccessType.Gameplay))
+			{
+				Response.StatusCode = (int)HttpStatusCode.Forbidden;
+				return result;
+			}
 
-					EUserSessionType sessionType = TokenHelper.GetSessionType(this);
-					if (user_id != -1 && SessionHelpers.SessionTypeHasAccessTo(sessionType, ESessionAccessType.Gameplay))
+			Dictionary<int, int> updates;
+			try
+			{
+				using StreamReader reader = new(HttpContext.Request.Body);
+				string jsonData = await reader.ReadToEndAsync(HttpContext.RequestAborted);
+				updates = PlayerStatsUpdateParser.ParseIntegerUpdates(jsonData);
+			}
+			catch (JsonException ex)
+			{
+				_logger.LogWarning(ex, "Rejected malformed player stats update for user {UserId}", userId);
+				Response.StatusCode = (int)HttpStatusCode.BadRequest;
+				return result;
+			}
+
+			try
+			{
+				await using var db = await _dbFactory.CreateDbContextAsync(HttpContext.RequestAborted);
+				await Database.UserStats.UpdatePlayerStats(db, userId, updates, HttpContext.RequestAborted);
+
+				// Publish to the live cache only after durable persistence succeeds.
+				SharedUserData? userData = WebSocketManager.GetSharedDataForUser(userId);
+				if (userData?.GameStats != null)
+				{
+					foreach ((int statId, int statValue) in updates)
 					{
-						List<JsonElement>? jsonReqData = JsonSerializer.Deserialize<List<JsonElement>>(jsonData, options);
-
-						// TODO: Update client so this is an associative array and not just in order...
-						if (jsonReqData != null)
-						{
-							int stat_id = 0;
-							foreach (JsonElement elem in jsonReqData)
-							{
-								// TODO: do we care about the string stats? they dont seem relevant, its things like system spec
-								try
-								{
-									if (elem.ValueKind != JsonValueKind.Null)
-									{
-										if (elem.TryGetInt32(out int statValInt))
-										{
-											// update cache too
-											if (user_id != -1)
-											{
-												SharedUserData? userData = WebSocketManager.GetSharedDataForUser(user_id);
-
-												if (userData != null)
-												{
-#pragma warning disable CS8602 // Dereference of a possibly null reference.
-													userData.GameStats.ProcessFromDB((EStatIndex)stat_id, statValInt);
-#pragma warning restore CS8602 // Dereference of a possibly null reference.
-												}
-											}
-
-											await using var db = await _dbFactory.CreateDbContextAsync();
-											await Database.UserStats.UpdatePlayerStat(db, user_id, stat_id, statValInt);
-											//Console.WriteLine("Stat {0} is valid and is {1}", (EStatIndex)stat_id, statValInt);
-											// game tracks the progress, so these are full writes, not incremental
-
-										}
-									}
-								}
-								catch
-								{
-									//Console.WriteLine("Stat {0} is invalid and is {1}", (EStatIndex)stat_id, elem.ToString());
-								}
-
-								++stat_id;
-							}
-						}
-						else
-						{
-							Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-						}
+						userData.GameStats.ProcessFromDB((EStatIndex)statId, statValue);
 					}
-					else
-					{
-						Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-					}
+
+					result.stats = userData.GameStats;
 				}
-				catch
-				{
-					return result;
-				}
+			}
+			catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Failed to persist player stats update for user {UserId}", userId);
+				SentrySdk.CaptureException(ex);
+				Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
 			}
 
 			return result;
