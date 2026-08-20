@@ -2391,32 +2391,32 @@ namespace GenOnlineService
 				throw new Exception("Config not loaded");
 			}
 
-			s_uploadsEnabled = Program.g_Config.GetSection("MatchData").GetValue<bool?>("upload_match_data") ?? false;
+			s_uploadsEnabled = Program.g_Config.GetSection("MatchData").GetValue<bool?>("UploadsEnabled") ?? false;
 
 			// When uploads are disabled, the S3 settings are intentionally optional.
 			if (!s_uploadsEnabled)
 			{
-				Console.WriteLine("MatchData: upload_match_data is false, replay and screenshot uploads are disabled.");
+				Console.WriteLine("MatchData:UploadsEnabled is false, replay and screenshot uploads are disabled.");
 				return;
 			}
 
-			GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string client_endpoint);
+			GetS3Config(out _, out string accessKey, out string secretKey, out _, out string serviceEndpoint);
 
 			var config = new AmazonS3Config
 			{
-				ServiceURL = client_endpoint,
+				ServiceURL = serviceEndpoint,
 				ForcePathStyle = true
 			};
 
-			m_s3client = new AmazonS3Client(access_key, secret_key, config);
+			m_s3client = new AmazonS3Client(accessKey, secretKey, config);
 		}
 
-		private static void GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string endpoint)
+		private static void GetS3Config(out int urlLifetimeMinutes, out string accessKey, out string secretKey, out string bucketName, out string endpoint)
 		{
-			TTL = -1;
-			access_key = String.Empty;
-			secret_key = String.Empty;
-			bucket_name = String.Empty;
+			urlLifetimeMinutes = -1;
+			accessKey = String.Empty;
+			secretKey = String.Empty;
+			bucketName = String.Empty;
 			endpoint = String.Empty;
 
 			if (Program.g_Config == null)
@@ -2424,49 +2424,49 @@ namespace GenOnlineService
 				throw new Exception("Config not loaded");
 			}
 
-			IConfigurationSection? turnSettings = Program.g_Config.GetSection("MatchData");
+			IConfigurationSection? matchDataSettings = Program.g_Config.GetSection("MatchData");
 
-			if (turnSettings == null)
+			if (matchDataSettings == null)
 			{
-				throw new Exception("MatchData section missing in config");
+				throw new Exception("MatchData section is missing from the configuration.");
 			}
 
-			string? s3_access_key = turnSettings.GetValue<string>("s3_access_key");
-			string? s3_secret_key = turnSettings.GetValue<string>("s3_secret_key");
-			string? s3_bucket_name = turnSettings.GetValue<string>("s3_bucket_name");
-			string? s3_endpoint = turnSettings.GetValue<string>("s3_endpoint");
-			int? s3_url_ttl_minutes = turnSettings.GetValue<int>("s3_url_ttl_minutes");
+			string? configuredAccessKey = matchDataSettings.GetValue<string>("S3AccessKey");
+			string? configuredSecretKey = matchDataSettings.GetValue<string>("S3SecretKey");
+			string? configuredBucketName = matchDataSettings.GetValue<string>("S3BucketName");
+			string? configuredEndpoint = matchDataSettings.GetValue<string>("S3Endpoint");
+			int? configuredUrlLifetimeMinutes = matchDataSettings.GetValue<int?>("S3UrlLifetimeMinutes");
 
-			if (s3_access_key == null)
+			if (configuredAccessKey == null)
 			{
-				throw new Exception("s3_access_key missing in config");
+				throw new Exception("MatchData:S3AccessKey is missing from the configuration.");
 			}
 
-			if (s3_secret_key == null)
+			if (configuredSecretKey == null)
 			{
-				throw new Exception("s3_secret_key missing in config");
+				throw new Exception("MatchData:S3SecretKey is missing from the configuration.");
 			}
 
-			if (s3_bucket_name == null)
+			if (configuredBucketName == null)
 			{
-				throw new Exception("s3_bucket_name missing in config");
+				throw new Exception("MatchData:S3BucketName is missing from the configuration.");
 			}
 
-			if (s3_endpoint == null)
+			if (configuredEndpoint == null)
 			{
-				throw new Exception("s3_endpoint missing in config");
+				throw new Exception("MatchData:S3Endpoint is missing from the configuration.");
 			}
 
-			if (s3_url_ttl_minutes == null)
+			if (configuredUrlLifetimeMinutes == null)
 			{
-				throw new Exception("s3_url_ttl_minutes missing in config");
+				throw new Exception("MatchData:S3UrlLifetimeMinutes is missing from the configuration.");
 			}
 
-			TTL = (int)s3_url_ttl_minutes;
-			access_key = s3_access_key;
-			secret_key = s3_secret_key;
-			bucket_name = s3_bucket_name;
-			endpoint = s3_endpoint;
+			urlLifetimeMinutes = configuredUrlLifetimeMinutes.Value;
+			accessKey = configuredAccessKey;
+			secretKey = configuredSecretKey;
+			bucketName = configuredBucketName;
+			endpoint = configuredEndpoint;
 		}
 
 		public static async Task<string?> GetPresignedURL(EMetadataFileType fileType, EScreenshotType screenshotTypeIfScreenshot, UInt64 matchID, Int64 userID, int slotIndex, DateTime matchStartTime)
@@ -2476,8 +2476,8 @@ namespace GenOnlineService
 				return null;
 			}
 
-			GetS3Config(out int TTL, out string access_key, out string secret_key, out string bucket_name, out string client_endpoint);
-			TimeSpan expiresIn = TimeSpan.FromMinutes(TTL);
+			GetS3Config(out int urlLifetimeMinutes, out _, out _, out string bucketName, out _);
+			TimeSpan expiresIn = TimeSpan.FromMinutes(urlLifetimeMinutes);
 
 			DateTime utcNow = DateTime.UtcNow;
 			int hour = utcNow.Hour;
@@ -2530,7 +2530,7 @@ namespace GenOnlineService
 
 			var request = new GetPreSignedUrlRequest
 			{
-				BucketName = bucket_name,
+				BucketName = bucketName,
 				Key = objectKey,
 				Verb = HttpVerb.PUT,
 				Expires = DateTime.UtcNow.Add(expiresIn),
@@ -2553,9 +2553,9 @@ namespace GenOnlineService
 	{
 		private static ConcurrentDictionary<Int64, string> g_DictTURNUsernames = new();
 
-		private static void GetTURNConfig(out int TTL, out string token, out string key, out bool bShouldInvalidateTokensAutomatically)
+		private static void GetTurnConfig(out int tokenTtl, out string token, out string key, out bool automaticallyInvalidateTokens)
 		{
-			TTL = -1;
+			tokenTtl = -1;
 			token = String.Empty;
 			key = String.Empty;
 
@@ -2564,42 +2564,42 @@ namespace GenOnlineService
 				throw new Exception("Config not loaded");
 			}
 
-			IConfigurationSection? turnSettings = Program.g_Config.GetSection("TURN");
+			IConfigurationSection? turnSettings = Program.g_Config.GetSection("Turn");
 
 			if (turnSettings == null)
 			{
-				throw new Exception("TURN section missing in config");
+				throw new Exception("Turn section is missing from the configuration.");
 			}
 
-			string? turn_key = turnSettings.GetValue<string>("key");
-			string? turn_token = turnSettings.GetValue<string>("token");
-			int? token_ttl = turnSettings.GetValue<int>("token_ttl");
-			bool? automatic_token_invalidate = turnSettings.GetValue<bool>("automatic_token_invalidate");
+			string? configuredKey = turnSettings.GetValue<string>("Key");
+			string? configuredToken = turnSettings.GetValue<string>("Token");
+			int? configuredTokenTtl = turnSettings.GetValue<int?>("TokenTtl");
+			bool? configuredAutomaticInvalidation = turnSettings.GetValue<bool?>("AutomaticallyInvalidateTokens");
 
-			if (turn_key == null)
+			if (configuredKey == null)
 			{
-				throw new Exception("turn_key missing in config");
+				throw new Exception("Turn:Key is missing from the configuration.");
 			}
 
-			if (turn_token == null)
+			if (configuredToken == null)
 			{
-				throw new Exception("turn_token missing in config");
+				throw new Exception("Turn:Token is missing from the configuration.");
 			}
 
-			if (token_ttl == null)
+			if (configuredTokenTtl == null)
 			{
-				throw new Exception("token_ttl missing in config");
+				throw new Exception("Turn:TokenTtl is missing from the configuration.");
 			}
 
-			if (automatic_token_invalidate == null)
+			if (configuredAutomaticInvalidation == null)
 			{
-				throw new Exception("automatic_token_invalidate missing in config");
+				throw new Exception("Turn:AutomaticallyInvalidateTokens is missing from the configuration.");
 			}
 
-			TTL = (int)token_ttl;
-			token = turn_token;
-			key = turn_key;
-			bShouldInvalidateTokensAutomatically = (bool)automatic_token_invalidate;
+			tokenTtl = configuredTokenTtl.Value;
+			token = configuredToken;
+			key = configuredKey;
+			automaticallyInvalidateTokens = configuredAutomaticInvalidation.Value;
 		}
 
 		public static async Task<TURNCredentialContainer?> CreateCredentialsForUser(Int64 userID)
@@ -2609,7 +2609,7 @@ namespace GenOnlineService
 			await Task.Delay(1);
 			return fakeCreds;
 #endif
-			GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out bool bShouldInvalidateTokensAutomatically);
+			GetTurnConfig(out int turnTokenTtl, out string turnToken, out string turnKey, out _);
 
 			// we should only have 1 turn credential at a time... clean it up
 			if (g_DictTURNUsernames.ContainsKey(userID))
@@ -2619,7 +2619,7 @@ namespace GenOnlineService
 
 			// create new credential
 			Dictionary<string, object> dictReqData = new();
-			dictReqData.Add("ttl", TurnTTL); // 4 hours
+			dictReqData.Add("ttl", turnTokenTtl); // 4 hours
 			dictReqData.Add("go_user_id", userID); // go user id
 			var jsonContent = JsonSerializer.Serialize(dictReqData);
 			using var requestContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
@@ -2662,13 +2662,13 @@ namespace GenOnlineService
 			}))
 			{
 				client.Timeout = TimeSpan.FromSeconds(10);
-				client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", TurnToken));
+				client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", turnToken));
 				client.DefaultRequestHeaders.Add("Accept", "application/json");
 				//client.DefaultRequestHeaders.Add("Content-Type", "application/json");
 				try
 				{
 					Console.WriteLine("Start req turn credentials at {0}", Environment.TickCount);
-					string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/generate-ice-servers", TurnKey);
+					string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/generate-ice-servers", turnKey);
 					HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
 
 					if (response.IsSuccessStatusCode)
@@ -2718,9 +2718,9 @@ namespace GenOnlineService
             return;
 #endif
 
-            GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out bool bShouldInvalidateTokensAutomatically);
+			GetTurnConfig(out _, out string turnToken, out string turnKey, out bool automaticallyInvalidateTokens);
 
-			if (!bShouldInvalidateTokensAutomatically)
+			if (!automaticallyInvalidateTokens)
 			{
 				return;
 			}
@@ -2774,11 +2774,11 @@ namespace GenOnlineService
 				}))
 				{
 					client.Timeout = TimeSpan.FromSeconds(10);
-					client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", TurnToken));
+					client.DefaultRequestHeaders.Add("Authorization", String.Format("Bearer {0}", turnToken));
 					client.DefaultRequestHeaders.Add("Accept", "application/json");
 					try
 					{
-						string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/{1}/revoke", TurnKey, strTURNUsername);
+						string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/{1}/revoke", turnKey, strTURNUsername);
 						HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
 					}
 					catch

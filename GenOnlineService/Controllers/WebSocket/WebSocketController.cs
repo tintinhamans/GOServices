@@ -1225,26 +1225,26 @@ namespace GenOnlineService.Controllers
 								bool bShouldFlag = true;
 								if (Program.g_Config != null)
 								{
-									IConfiguration? acSettings = Program.g_Config.GetSection("AC");
+									IConfiguration? antiCheatSettings = Program.g_Config.GetSection("AntiCheat");
 
-									if (acSettings != null)
+									if (antiCheatSettings != null)
 									{
-										List<string>? lstAllowedModules = acSettings.GetSection("allowed_modules").Get<List<string>>();
-										List<string>? lstAllowedModulePaths = acSettings.GetSection("allowed_module_paths").Get<List<string>>();
+										List<string>? allowedModules = antiCheatSettings.GetSection("AllowedModules").Get<List<string>>();
+										List<string>? allowedModulePaths = antiCheatSettings.GetSection("AllowedModulePaths").Get<List<string>>();
 
-										if (lstAllowedModules != null)
+										if (allowedModules != null)
 										{
-											if (lstAllowedModules.Contains(strModuleFilename))
+											if (allowedModules.Contains(strModuleFilename))
 											{
 												bShouldFlag = false;
 											}
 										}
 
-										if (lstAllowedModulePaths != null)
+										if (allowedModulePaths != null)
 										{
-											foreach (string strAllowedDir in lstAllowedModulePaths)
+											foreach (string allowedDirectory in allowedModulePaths)
 											{
-												if (strModulePath.StartsWith(strAllowedDir))
+												if (strModulePath.StartsWith(allowedDirectory))
 												{
 													bShouldFlag = false;
 												}

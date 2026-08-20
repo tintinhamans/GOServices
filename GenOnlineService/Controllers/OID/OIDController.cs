@@ -169,35 +169,35 @@ namespace GenOnlineService.Controllers.LoginWithToken
 
 		if (middlewareSettings == null)
 		{
-			throw new Exception("Middleware section missing in config");
+			throw new Exception("Middleware section is missing from the configuration.");
 		}
 
-		string? middleware_jwks_endpoint = middlewareSettings.GetValue<string>("jwks_endpoint");
-		string? middleware_audience = middlewareSettings.GetValue<string>("audience");
-		string? middleware_issuer = middlewareSettings.GetValue<string>("issuer");
+		string? middlewareJwksEndpoint = middlewareSettings.GetValue<string>("JwksEndpoint");
+		string? middlewareAudience = middlewareSettings.GetValue<string>("Audience");
+		string? middlewareIssuer = middlewareSettings.GetValue<string>("Issuer");
 
-		if (middleware_jwks_endpoint == null)
+		if (middlewareJwksEndpoint == null)
 		{
-			throw new Exception("middleware_jwks_endpoint missing in config");
+			throw new Exception("Middleware:JwksEndpoint is missing from the configuration.");
 		}
 
-		if (middleware_audience == null)
+		if (middlewareAudience == null)
 		{
-			throw new Exception("middleware_audience missing in config");
+			throw new Exception("Middleware:Audience is missing from the configuration.");
 		}
 
-		if (middleware_issuer == null)
+		if (middlewareIssuer == null)
 		{
-			throw new Exception("middleware_issuer missing in config");
+			throw new Exception("Middleware:Issuer is missing from the configuration.");
 		}
 
 		// get JWKS (cached; refreshed on an unknown kid in case of key rotation)
-		var jwks = await GetJwks(middleware_jwks_endpoint, false);
+		var jwks = await GetJwks(middlewareJwksEndpoint, false);
 
 		var key = jwks?.Keys?.FirstOrDefault(k => k.Kid == kid);
 		if (key == null)
 		{
-			jwks = await GetJwks(middleware_jwks_endpoint, true);
+			jwks = await GetJwks(middlewareJwksEndpoint, true);
 			key = jwks?.Keys?.FirstOrDefault(k => k.Kid == kid);
 		}
 
@@ -215,10 +215,10 @@ namespace GenOnlineService.Controllers.LoginWithToken
 		var validationParameters = new TokenValidationParameters
 		{
 			ValidateIssuer = true,
-			ValidIssuer = middleware_issuer,
+			ValidIssuer = middlewareIssuer,
 
 			ValidateAudience = true,
-			ValidAudience = middleware_audience,
+			ValidAudience = middlewareAudience,
 
 			ValidateLifetime = true,
 			ClockSkew = TimeSpan.FromMinutes(2),
