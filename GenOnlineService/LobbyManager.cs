@@ -209,14 +209,14 @@ namespace GenOnlineService
 						}
 					}
 
-					bool bDisableMeshCheck = false;
+					bool disableFullMeshCheck = false;
 					if (Program.g_Config != null)
 					{
 						IConfiguration? coreSettings = Program.g_Config.GetSection("Core");
 
 						if (coreSettings != null)
 						{
-							bDisableMeshCheck = coreSettings.GetValue<bool>("disable_full_mesh_check");
+							disableFullMeshCheck = coreSettings.GetValue<bool>("DisableFullMeshCheck");
 						}
 					}
 
@@ -227,7 +227,7 @@ namespace GenOnlineService
 					WebSocketMessage_FullMeshConnectivityCheckOutcome outcome = new WebSocketMessage_FullMeshConnectivityCheckOutcome();
 					outcome.msg_id = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST;
 
-					if (bDisableMeshCheck)
+					if (disableFullMeshCheck)
 					{
 						outcome.mesh_complete = true;
 						outcome.missing_connections = new List<MissingConnectionEntry>();

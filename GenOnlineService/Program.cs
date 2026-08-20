@@ -101,7 +101,7 @@ namespace GenOnlineService
 		private static List<string>? s_cachedApiKeys = null;
 		private static readonly object s_cacheLock = new object();
 
-		public static bool ValidateKey(string strKey)
+		public static bool ValidateKey(string key)
 		{
 			if (Program.g_Config == null)
 			{
@@ -114,31 +114,31 @@ namespace GenOnlineService
 				{
 					if (s_cachedApiKeys == null)
 					{
-						IConfiguration? apiSettings = Program.g_Config.GetSection("API");
+						IConfiguration? apiSettings = Program.g_Config.GetSection("Api");
 						if (apiSettings == null)
 						{
 							return false;
 						}
 
-						List<string>? api_keys = apiSettings.GetSection("keys").Get<List<string>>();
-						if (api_keys == null)
+						List<string>? apiKeys = apiSettings.GetSection("Keys").Get<List<string>>();
+						if (apiKeys == null)
 						{
 							return false;
 						}
 
-						s_cachedApiKeys = api_keys.Select(k => k.ToUpperInvariant()).ToList();
+						s_cachedApiKeys = apiKeys.Select(value => value.ToUpperInvariant()).ToList();
 					}
 				}
 			}
 
-			string strKeyUpper = strKey.ToUpperInvariant();
+			string normalizedKey = key.ToUpperInvariant();
 
 			// Compare against every key without short-circuiting, so timing doesn't leak which key
 			// (or how much of a key) matched.
 			bool bMatched = false;
 			foreach (string strKnownKey in s_cachedApiKeys)
 			{
-				bMatched |= SecretComparer.FixedTimeEquals(strKnownKey, strKeyUpper);
+				bMatched |= SecretComparer.FixedTimeEquals(strKnownKey, normalizedKey);
 			}
 
 			return bMatched;
@@ -212,20 +212,20 @@ namespace GenOnlineService
 
 							if (monitorSettings == null)
 							{
-								throw new Exception("Monitor section missing in config");
+								throw new Exception("Monitor section is missing from the configuration.");
 							}
 
-							string? monitorUsername = monitorSettings.GetValue<string>("username");
-							string? monitorPassword = monitorSettings.GetValue<string>("password");
+							string? monitorUsername = monitorSettings.GetValue<string>("Username");
+							string? monitorPassword = monitorSettings.GetValue<string>("Password");
 
 							if (monitorUsername == null)
 							{
-								throw new Exception("Monitor Username missing in config");
+								throw new Exception("Monitor:Username is missing from the configuration.");
 							}
 
 							if (monitorPassword == null)
 							{
-								throw new Exception("Monitor Password missing in config");
+								throw new Exception("Monitor:Password is missing from the configuration.");
 							}
 
 							if (SecretComparer.FixedTimeEquals(monitorUsername, strUsername)
@@ -387,51 +387,51 @@ namespace GenOnlineService
 				throw new Exception("Config is null. Check config file exists.");
 			}
 
-			IConfiguration? dbSettings = Program.g_Config.GetSection("Database");
+			IConfiguration? databaseSettings = Program.g_Config.GetSection("Database");
 
-			if (dbSettings == null)
+			if (databaseSettings == null)
 			{
-				throw new Exception("Database section in config is null / not set in config");
+				throw new Exception("Database section is missing from the configuration.");
 			}
 
-			string? hostname = dbSettings.GetValue<string>("db_host");
-			string? dbname = dbSettings.GetValue<string>("db_name");
-			string? username = dbSettings.GetValue<string>("db_username");
-			string? password = dbSettings.GetValue<string>("db_password");
-			UInt16? port = dbSettings.GetValue<UInt16>("db_port");
+			string? databaseHost = databaseSettings.GetValue<string>("Host");
+			string? databaseName = databaseSettings.GetValue<string>("Name");
+			string? databaseUsername = databaseSettings.GetValue<string>("Username");
+			string? databasePassword = databaseSettings.GetValue<string>("Password");
+			UInt16? databasePort = databaseSettings.GetValue<UInt16>("Port");
 
 			// Fall back to MySql.Data's own defaults when a key is absent, rather than silently
 			// disabling pooling / zeroing the pool size for deployments predating these settings.
-			int db_min_poolsize = dbSettings.GetValue<int?>("db_min_poolsize") ?? 0;
-			int db_max_poolsize = dbSettings.GetValue<int?>("db_max_poolsize") ?? 100;
-			bool db_use_pooling = dbSettings.GetValue<bool?>("db_use_pooling") ?? true;
-			bool db_conn_reset = dbSettings.GetValue<bool?>("db_conn_reset") ?? true;
-			int? db_connect_timeout = dbSettings.GetValue<int>("db_connect_timeout");
-			int? db_command_timeout = dbSettings.GetValue<int>("db_command_timeout");
+			int minimumPoolSize = databaseSettings.GetValue<int?>("MinimumPoolSize") ?? 0;
+			int maximumPoolSize = databaseSettings.GetValue<int?>("MaximumPoolSize") ?? 100;
+			bool usePooling = databaseSettings.GetValue<bool?>("UsePooling") ?? true;
+			bool resetConnections = databaseSettings.GetValue<bool?>("ResetConnections") ?? true;
+			int? connectionTimeoutSeconds = databaseSettings.GetValue<int>("ConnectionTimeoutSeconds");
+			int? commandTimeoutSeconds = databaseSettings.GetValue<int>("CommandTimeoutSeconds");
 
-			if (hostname == null)
+			if (databaseHost == null)
 			{
-				throw new Exception("DB Hostname is null / not set in config");
+				throw new Exception("Database:Host is missing from the configuration.");
 			}
 
-			if (dbname == null)
+			if (databaseName == null)
 			{
-				throw new Exception("DB Hostname is null / not set in config");
+				throw new Exception("Database:Name is missing from the configuration.");
 			}
 
-			if (username == null)
+			if (databaseUsername == null)
 			{
-				throw new Exception("DB Hostname is null / not set in config");
+				throw new Exception("Database:Username is missing from the configuration.");
 			}
 
-			if (password == null)
+			if (databasePassword == null)
 			{
-				throw new Exception("DB Hostname is null / not set in config");
+				throw new Exception("Database:Password is missing from the configuration.");
 			}
 
-			if (port == null)
+			if (databasePort == null)
 			{
-				throw new Exception("DB Hostname is null / not set in config");
+				throw new Exception("Database:Port is missing from the configuration.");
 			}
 
 			// TODO_EFCORE: Log exceptions to disk again
@@ -444,20 +444,20 @@ namespace GenOnlineService
 			{
 				//var builder = WebApplication.CreateBuilder(args);
 
-				var csb = new MySql.Data.MySqlClient.MySqlConnectionStringBuilder
+				var connectionStringBuilder = new MySql.Data.MySqlClient.MySqlConnectionStringBuilder
 				{
-					Server = hostname,
-					Port = (uint)port,
-					Database = dbname,
-					UserID = username,
-					Password = password,
-					ConnectionTimeout = (uint)db_connect_timeout,
-					DefaultCommandTimeout = (uint)db_command_timeout,
+					Server = databaseHost,
+					Port = (uint)databasePort,
+					Database = databaseName,
+					UserID = databaseUsername,
+					Password = databasePassword,
+					ConnectionTimeout = (uint)connectionTimeoutSeconds,
+					DefaultCommandTimeout = (uint)commandTimeoutSeconds,
 					SslMode = MySql.Data.MySqlClient.MySqlSslMode.Preferred,
-					Pooling = db_use_pooling,
-					MinimumPoolSize = (uint)db_min_poolsize,
-					MaximumPoolSize = (uint)db_max_poolsize,
-					ConnectionReset = db_conn_reset
+					Pooling = usePooling,
+					MinimumPoolSize = (uint)minimumPoolSize,
+					MaximumPoolSize = (uint)maximumPoolSize,
+					ConnectionReset = resetConnections
 				};
 
 				// TODO_EFCORE: Consider use of ExecuteDeleteAsync and options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
@@ -465,8 +465,8 @@ namespace GenOnlineService
 				builder.Services.AddPooledDbContextFactory<AppDbContext>(options =>
 				{
 					options.UseMySql(
-						csb.ConnectionString,
-						ServerVersion.AutoDetect(csb.ConnectionString));
+						connectionStringBuilder.ConnectionString,
+						ServerVersion.AutoDetect(connectionStringBuilder.ConnectionString));
 
 					options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 
@@ -482,16 +482,16 @@ namespace GenOnlineService
 
 		// The signing key is the only thing standing between a user and a forged token, so refuse to
 		// start with a placeholder or a key too short for HS256.
-		private static void ValidateSigningKey(string strKey)
+		private static void ValidateSigningKey(string signingKey)
 		{
-			int keyBytes = Encoding.UTF8.GetByteCount(strKey);
+			int keyBytes = Encoding.UTF8.GetByteCount(signingKey);
 
 			if (keyBytes < 32)
 			{
 				throw new Exception($"JwtSettings:Key is only {keyBytes} bytes; HS256 requires at least 32 bytes of key material.");
 			}
 
-			if (strKey.Contains("TODO", StringComparison.OrdinalIgnoreCase))
+			if (signingKey.Contains("TODO", StringComparison.OrdinalIgnoreCase))
 			{
 				throw new Exception("JwtSettings:Key is still set to the placeholder value. Set a real secret before starting the service.");
 			}
@@ -640,7 +640,7 @@ namespace GenOnlineService
 
 					if (jwtSettings != null)
 					{
-						if (jwtSettings.GetValue<bool>("enforce_ip_match"))
+						if (jwtSettings.GetValue<bool>("EnforceIPMatch"))
 						{
 							string strExpectedIP = addressClaim.Value;
 							string currentIP = IPHelpers.NormalizeIP(context.HttpContext.Connection.RemoteIpAddress?.ToString());
@@ -689,16 +689,16 @@ namespace GenOnlineService
 
 				if (jwtSettings == null)
 				{
-					throw new Exception("JWT Settings not found in configuration");
+					throw new Exception("JwtSettings section is missing from the configuration.");
 				}
 
-				string? strKey = jwtSettings["Key"];
-				if (strKey == null)
+				string? signingKey = jwtSettings["Key"];
+				if (signingKey == null)
 				{
-					throw new Exception("JWT Key not found in configuration");
+					throw new Exception("JwtSettings:Key is missing from the configuration.");
 				}
 
-				var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(strKey));
+				var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey));
 				var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
 				jti = Guid.NewGuid().ToString();
@@ -748,7 +748,7 @@ namespace GenOnlineService
 					issuer: jwtSettings["Issuer"],
 					audience: jwtSettings["Audience"],
 					claims: claims,
-					expires: DateTime.Now.AddMinutes(Convert.ToDouble(tokenType == ETokenType.Session ? jwtSettings["ExpiresInMinutes_Session"] : jwtSettings["ExpiresInMinutes_Refresh"])),
+					expires: DateTime.Now.AddMinutes(Convert.ToDouble(tokenType == ETokenType.Session ? jwtSettings["SessionTokenLifetimeMinutes"] : jwtSettings["RefreshTokenLifetimeMinutes"])),
 					signingCredentials: credentials
 				);
 
@@ -756,7 +756,7 @@ namespace GenOnlineService
 			}
 		}
 
-		public static string GetWebSocketAddress(bool bSecure)
+		public static string GetWebSocketAddress(bool secure)
 		{
 			if (Program.g_Config == null)
 			{
@@ -771,16 +771,16 @@ namespace GenOnlineService
 			}
 
 
-			string configKey = bSecure ? "ws_address" : "ws_address_insecure";
+			string configKey = secure ? "WebSocketAddress" : "InsecureWebSocketAddress";
 
-			string? ws_address = coreSettings.GetValue<string>(configKey);
+			string? webSocketAddress = coreSettings.GetValue<string>(configKey);
 
-			if (ws_address == null)
+			if (webSocketAddress == null)
 			{
 				throw new Exception(String.Format("{0} in Core section of config is null.", configKey));
 			}
 
-			return ws_address;
+			return webSocketAddress;
 		}
 
 		public static async Task Main(string[] args)
@@ -804,29 +804,29 @@ namespace GenOnlineService
 
 			if (sentrySettings == null)
 			{
-				throw new Exception("Sentry section missing in config");
+				throw new Exception("Sentry section is missing from the configuration.");
 			}
 
-			bool? sentry_enabled = sentrySettings.GetValue<bool>("enabled");
-			string? sentry_dsn = sentrySettings.GetValue<string>("dsn");
-			string? sentry_env = sentrySettings.GetValue<string>("environment");
+			bool? sentryEnabled = sentrySettings.GetValue<bool?>("Enabled");
+			string? sentryDsn = sentrySettings.GetValue<string>("Dsn");
+			string? sentryEnvironment = sentrySettings.GetValue<string>("Environment");
 
-			if (sentry_enabled == null)
+			if (sentryEnabled == null)
 			{
-				throw new Exception("sentry_enabled missing in config");
+				throw new Exception("Sentry:Enabled is missing from the configuration.");
 			}
 
-			if (sentry_dsn == null)
+			if (sentryDsn == null)
 			{
-				throw new Exception("sentry_dsn missing in config");
+				throw new Exception("Sentry:Dsn is missing from the configuration.");
 			}
 
-			if (sentry_env == null)
+			if (sentryEnvironment == null)
 			{
-				sentry_env = "production";
+				sentryEnvironment = "production";
 			}
 
-			if ((bool)sentry_enabled)
+			if (sentryEnabled.Value)
 			{
 				// init sentry
 				SentrySdk.Init(options =>
@@ -834,7 +834,7 @@ namespace GenOnlineService
 					// A Sentry Data Source Name (DSN) is required.
 					// See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
 					// You can set it in the SENTRY_DSN environment variable, or you can set it in code here.
-					options.Dsn = sentry_dsn;
+					options.Dsn = sentryDsn;
 
 					// When debug is enabled, the Sentry client will emit detailed debugging information to the console.
 					// This might be helpful, or might interfere with the normal operation of your application.
@@ -845,7 +845,7 @@ namespace GenOnlineService
 					// This option is recommended. It enables Sentry's "Release Health" feature.
 					options.AutoSessionTracking = true;
 
-					options.Environment = sentry_env;
+					options.Environment = sentryEnvironment;
 
 					options.Release = "generalsonline-services@081326";
 				});
@@ -856,8 +856,8 @@ namespace GenOnlineService
 
 			// create discord?
 			var discordSettings = Program.g_Config.GetSection("Discord");
-			bool bEnableDiscord = discordSettings.GetValue<bool>("enable_discord");
-			if (bEnableDiscord)
+			bool discordEnabled = discordSettings.GetValue<bool>("Enabled");
+			if (discordEnabled)
 			{
 				g_Discord = new DiscordBot();
 			}
@@ -865,9 +865,9 @@ namespace GenOnlineService
 			builder.Services.AddSingleton<LobbyManager>();
 
 			var rateLimitingSettings = Program.g_Config.GetSection("RateLimiting");
-			bool bUseBuiltinRateLimiter = rateLimitingSettings.GetValue<bool>("use_builtin_ratelimiter"); // use built in Kestrel/dotnet rate limiting if you do not have a reverse proxy or other rate limiter in front of service
+			bool useBuiltInRateLimiter = rateLimitingSettings.GetValue<bool>("UseBuiltInRateLimiter"); // use built in Kestrel/dotnet rate limiting if you do not have a reverse proxy or other rate limiter in front of service
 
-			if (bUseBuiltinRateLimiter)
+			if (useBuiltInRateLimiter)
 			{
 				builder.Services.AddRateLimiter(options =>
 				{
@@ -928,13 +928,13 @@ namespace GenOnlineService
 			{
 				var jwtSettings = builder.Configuration.GetSection("JwtSettings");
 
-				string? strKey = jwtSettings["Key"];
-				if (strKey == null)
+				string? signingKey = jwtSettings["Key"];
+				if (signingKey == null)
 				{
-					throw new Exception("JWT Key not found in configuration");
+					throw new Exception("JwtSettings:Key is missing from the configuration.");
 				}
 
-				ValidateSigningKey(strKey);
+				ValidateSigningKey(signingKey);
 
 				options.TokenValidationParameters = new TokenValidationParameters
 				{
@@ -944,7 +944,7 @@ namespace GenOnlineService
 					ValidateIssuerSigningKey = true,
 					ValidIssuer = jwtSettings["Issuer"],
 					ValidAudience = jwtSettings["Audience"],
-					IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(strKey)),
+					IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
 
 					// Pin the algorithm so only tokens signed the way we sign them are accepted.
 					ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
@@ -1038,7 +1038,7 @@ namespace GenOnlineService
 			// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 			//builder.Services.AddOpenApi();
 
-			X509Certificate2? X509Certificate2 = null;
+			X509Certificate2? serverCertificate = null;
 
 			var coreSettings = Program.g_Config.GetSection("Core");
 
@@ -1049,29 +1049,30 @@ namespace GenOnlineService
 				return;
 			}
 
-			bool use_os_cert_store = coreSettings.GetValue<bool>("use_os_cert_store");
-			string? cert_pem_path = coreSettings.GetValue<string>("cert_pem_path");
-			string? cert_key_path = coreSettings.GetValue<string>("cert_key_path");
+			bool? useSystemCertificateStoreSetting = coreSettings.GetValue<bool?>("UseSystemCertificateStore");
+			string? certificatePemPath = coreSettings.GetValue<string>("CertificatePemPath");
+			string? certificateKeyPath = coreSettings.GetValue<string>("CertificateKeyPath");
 
-			if (use_os_cert_store == null)
+			if (useSystemCertificateStoreSetting == null)
 			{
-				Console.WriteLine("FATAL ERROR: use_os_cert_store is not set in the config");
+				Console.WriteLine("FATAL ERROR: Core:UseSystemCertificateStore is not set in the configuration");
 				Console.ReadKey(true);
 				return;
 			}
 
-			if (!use_os_cert_store) // if not using the cert store, we need a pem and key
+			bool useSystemCertificateStore = useSystemCertificateStoreSetting.Value;
+			if (!useSystemCertificateStore) // if not using the cert store, we need a PEM certificate and key
 			{
-				if (cert_pem_path == null)
+				if (certificatePemPath == null)
 				{
-					Console.WriteLine("FATAL ERROR: cert_pem_path is not set in the config");
+					Console.WriteLine("FATAL ERROR: Core:CertificatePemPath is not set in the configuration");
 					Console.ReadKey(true);
 					return;
 				}
 
-				if (cert_key_path == null)
+				if (certificateKeyPath == null)
 				{
-					Console.WriteLine("FATAL ERROR: cert_key_path is not set in the config");
+					Console.WriteLine("FATAL ERROR: Core:CertificateKeyPath is not set in the configuration");
 					Console.ReadKey(true);
 					return;
 				}
@@ -1080,23 +1081,22 @@ namespace GenOnlineService
 
 			//UInt16 port = coreSettings.GetValue<UInt16>("port");
 
-			bool bShouldUseOSCertSTore = (bool)use_os_cert_store;
-			if (!bShouldUseOSCertSTore)
+			if (!useSystemCertificateStore)
 			{
-				if (String.IsNullOrEmpty(cert_pem_path) || String.IsNullOrEmpty(cert_key_path))
+				if (String.IsNullOrEmpty(certificatePemPath) || String.IsNullOrEmpty(certificateKeyPath))
 				{
-					Console.WriteLine("FATAL ERROR: use_os_cert_store is set to false, but cert_pem_path and/or cert_key_path were not provided / null!");
+					Console.WriteLine("FATAL ERROR: Core:UseSystemCertificateStore is false, but Core:CertificatePemPath or Core:CertificateKeyPath is empty.");
 					Console.ReadKey(true);
 					return;
 				}
 				else
 				{
-					//X509Certificate2 = CertHelpers.LoadPemWithPrivateKey(cert_pem_path, cert_key_path);
+					//serverCertificate = CertHelpers.LoadPemWithPrivateKey(certificatePemPath, certificateKeyPath);
 
-					X509Certificate2 = X509Certificate2.CreateFromPemFile(cert_pem_path, cert_key_path);
+					serverCertificate = X509Certificate2.CreateFromPemFile(certificatePemPath, certificateKeyPath);
 
 
-					if (X509Certificate2 == null)
+					if (serverCertificate == null)
 					{
 						Console.WriteLine("FATAL ERROR: Failed to load the provided certificate!");
 						Console.ReadKey(true);
@@ -1108,28 +1108,28 @@ namespace GenOnlineService
 			var kestrelSettings = Program.g_Config.GetSection("Kestrel");
 			var endpointSettings = kestrelSettings.GetSection("Endpoints");
 			var httpsSettings = endpointSettings.GetSection("HTTPS");
-			string? serverURI = httpsSettings.GetValue<string>("Url");
+			string? serverUri = httpsSettings.GetValue<string>("Url");
 
-			if (serverURI == null)
+			if (serverUri == null)
 			{
-				Console.WriteLine("FATAL ERROR: serverURI is not set in the config");
+				Console.WriteLine("FATAL ERROR: Kestrel:Endpoints:HTTPS:Url is not set in the configuration");
 				Console.ReadKey(true);
 				return;
 			}
 
-			// Parse the port number out of serverURI
+			// Parse the port number out of serverUri
 			int port = -1;
 			try
 			{
-				if (!string.IsNullOrEmpty(serverURI))
+				if (!string.IsNullOrEmpty(serverUri))
 				{
-					var uri = new Uri(serverURI);
+					var uri = new Uri(serverUri);
 					port = uri.Port;
 				}
 			}
 			catch
 			{
-				Console.WriteLine("ERROR: Failed to parse port from serverURI: " + serverURI);
+				Console.WriteLine("ERROR: Failed to parse port from serverUri: " + serverUri);
 			}
 
 
@@ -1140,18 +1140,18 @@ namespace GenOnlineService
 				options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(30);
 				options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
 
-				if (!bShouldUseOSCertSTore && X509Certificate2 != null)
+				if (!useSystemCertificateStore && serverCertificate != null)
 				{
 					options.ConfigureHttpsDefaults(httpsOptions =>
 					{
 						httpsOptions.SslProtocols = System.Security.Authentication.SslProtocols.Tls12;
-						httpsOptions.ServerCertificate = X509Certificate2;
+					httpsOptions.ServerCertificate = serverCertificate;
 					});
 				}
 
-				if (!bShouldUseOSCertSTore && X509Certificate2 != null)
+				if (!useSystemCertificateStore && serverCertificate != null)
 				{
-					//options.ListenAnyIP(port, listenOptions => listenOptions.UseHttps(X509Certificate2!));
+					//options.ListenAnyIP(port, listenOptions => listenOptions.UseHttps(serverCertificate));
 				}
 
 			});
@@ -1162,7 +1162,7 @@ namespace GenOnlineService
 			var app = builder.Build();
 			ServiceLocator.Services = app.Services;
 
-			if (bUseBuiltinRateLimiter)
+			if (useBuiltInRateLimiter)
 			{
 				app.UseRateLimiter();
 			}
@@ -1197,8 +1197,8 @@ namespace GenOnlineService
 
 			// HTTPS enforcement. Gated because TLS may be terminated upstream (or a plain-HTTP
 			// listener may be deliberately in use), in which case redirecting would break clients.
-			bool bEnforceHttps = builder.Configuration.GetSection("Core").GetValue<bool>("enforce_https");
-			if (bEnforceHttps)
+			bool enforceHttps = builder.Configuration.GetSection("Core").GetValue<bool>("EnforceHttps");
+			if (enforceHttps)
 			{
 				app.UseHsts();
 
@@ -1212,7 +1212,7 @@ namespace GenOnlineService
 			else
 			{
 				Console.ForegroundColor = ConsoleColor.Red;
-				Console.WriteLine("*** WARNING: Core:enforce_https is disabled. Bearer tokens will be sent in clear text over any plain-HTTP listener. ***");
+				Console.WriteLine("*** WARNING: Core:EnforceHttps is disabled. Bearer tokens will be sent in clear text over any plain-HTTP listener. ***");
 				Console.ForegroundColor = ConsoleColor.Gray;
 			}
 

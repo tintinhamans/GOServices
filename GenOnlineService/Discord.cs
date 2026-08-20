@@ -144,14 +144,14 @@ public class DiscordBot
                 return;
             }
 
-            bool discord_send_room_chat_to_discord = discordSettings.GetValue<bool>("send_room_chat_to_discord");
+			bool? sendRoomChatToDiscord = discordSettings.GetValue<bool?>("SendRoomChatToDiscord");
 
-            if (discord_send_room_chat_to_discord == null)
-            {
-                return;
-            }
+			if (sendRoomChatToDiscord == null)
+			{
+				return;
+			}
 
-			if (discord_send_room_chat_to_discord)
+			if (sendRoomChatToDiscord.Value)
 			{
                 string strFormattedChatMsg = String.Format("[{0} - UID {1}] {2}", strDisplayName, userID, strMessage);
 
@@ -207,17 +207,17 @@ public class DiscordBot
 			return Task.CompletedTask;
 		}
 
-		UInt64? discord_network_room_chat_channel = discordSettings.GetValue<UInt64>("discord_network_room_chat_channel");
-		UInt64? discord_admin_commands_channel = discordSettings.GetValue<UInt64>("discord_admin_commands_channel");
+		UInt64? networkRoomChatChannelId = discordSettings.GetValue<UInt64?>("NetworkRoomChatChannelId");
+		UInt64? adminCommandsChannelId = discordSettings.GetValue<UInt64?>("AdminCommandsChannelId");
 
-		if (discord_network_room_chat_channel == null || discord_admin_commands_channel == null)
+		if (networkRoomChatChannelId == null || adminCommandsChannelId == null)
 		{
 			return Task.CompletedTask;
 		}
 
 		// cache our channels
-		g_dictChannelIDs[EDiscordChannelIDs.NetworkRoomChat] = (ulong)discord_network_room_chat_channel;
-		g_dictChannelIDs[EDiscordChannelIDs.AdminCommands] = (ulong)discord_admin_commands_channel;
+		g_dictChannelIDs[EDiscordChannelIDs.NetworkRoomChat] = (ulong)networkRoomChatChannelId;
+		g_dictChannelIDs[EDiscordChannelIDs.AdminCommands] = (ulong)adminCommandsChannelId;
 
 		ISocketMessageChannel? channel = GetChannel(EDiscordChannelIDs.NetworkRoomChat);
 		if (channel != null)
@@ -394,14 +394,14 @@ public class DiscordBot
 									return;
 								}
 
-								List<UInt64>? discord_admins = discordSettings.GetSection("discord_admins").Get<List<UInt64>>();
-								if (discord_admins == null)
+								List<UInt64>? adminUserIds = discordSettings.GetSection("AdminUserIds").Get<List<UInt64>>();
+								if (adminUserIds == null)
 								{
 									return;
 								}
 
 								// is it an admin?
-								if (discord_admins.Contains(message.Author.Id))
+								if (adminUserIds.Contains(message.Author.Id))
 								{
 									string start_time = Program.g_LastStartTime.ToString("yyyy-MM-dd HH:mm:ss");
 
@@ -438,13 +438,13 @@ public class DiscordBot
 									return;
 								}
 
-								List<UInt64>? discord_admins = discordSettings.GetSection("discord_admins").Get<List<UInt64>>();
-								if (discord_admins == null)
+								List<UInt64>? adminUserIds = discordSettings.GetSection("AdminUserIds").Get<List<UInt64>>();
+								if (adminUserIds == null)
 								{
 									return;
 								}
 
-								if (discord_admins.Contains(message.Author.Id))
+								if (adminUserIds.Contains(message.Author.Id))
 								{
 									int peak = GenOnlineService.WebSocketManager.g_PeakConnectionCount;
 									string strMessage = String.Format("The highest player peak seen (since last server restart) is {0}", peak);
@@ -479,13 +479,13 @@ public class DiscordBot
 									return;
 								}
 
-								List<UInt64>? discord_admins = discordSettings.GetSection("discord_admins").Get<List<UInt64>>();
-								if (discord_admins == null)
+								List<UInt64>? adminUserIds = discordSettings.GetSection("AdminUserIds").Get<List<UInt64>>();
+								if (adminUserIds == null)
 								{
 									return;
 								}
 
-								if (discord_admins.Contains(message.Author.Id))
+								if (adminUserIds.Contains(message.Author.Id))
 								{
 									string[] strComponents = message.Content.Split(' ');
 									//var clients = message.Author.ActiveClients;
@@ -552,13 +552,13 @@ public class DiscordBot
 									return;
 								}
 
-								List<UInt64>? discord_admins = discordSettings.GetSection("discord_admins").Get<List<UInt64>>();
-								if (discord_admins == null)
+								List<UInt64>? adminUserIds = discordSettings.GetSection("AdminUserIds").Get<List<UInt64>>();
+								if (adminUserIds == null)
 								{
 									return;
 								}
 
-								if (discord_admins.Contains(message.Author.Id))
+								if (adminUserIds.Contains(message.Author.Id))
 								{
 									string[] strComponents = message.Content.Split(' ');
 
@@ -607,13 +607,13 @@ public class DiscordBot
 									return;
 								}
 
-								List<UInt64>? discord_admins = discordSettings.GetSection("discord_admins").Get<List<UInt64>>();
-								if (discord_admins == null)
+								List<UInt64>? adminUserIds = discordSettings.GetSection("AdminUserIds").Get<List<UInt64>>();
+								if (adminUserIds == null)
 								{
 									return;
 								}
 
-								if (discord_admins.Contains(message.Author.Id))
+								if (adminUserIds.Contains(message.Author.Id))
 								{
 									string[] strComponents = message.Content.Split(' ');
 
@@ -743,14 +743,14 @@ public class DiscordBot
 
 		if (discordSettings == null)
 		{
-			throw new Exception("Discord section missing in config");
+			throw new Exception("Discord section is missing from the configuration.");
 		}
 
-		string? discordToken = discordSettings.GetValue<string>("token");
+		string? discordToken = discordSettings.GetValue<string>("Token");
 
 		if (discordToken == null)
 		{
-			throw new Exception("Discord Token missing in config");
+			throw new Exception("Discord:Token is missing from the configuration.");
 		}
 
 		await discord.LoginAsync(TokenType.Bot, discordToken).ConfigureAwait(true);
