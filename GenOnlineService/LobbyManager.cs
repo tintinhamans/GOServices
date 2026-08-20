@@ -735,9 +735,6 @@ namespace GenOnlineService
 				Members[i] = placeholderMember;
 			}
 
-            using var scope = ServiceLocator.Services.CreateScope();
-            var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
-            _db = factory.CreateDbContext();
         }
 
         public event Action<Lobby>? OnLobbyNeedsDestroyed;
@@ -1423,7 +1420,6 @@ public async Task FinalizeACChecks()
 		private int m_cachedAtStart_numOpen = -1;
 		private int m_cachedAtStart_numClosed = -1;
 		private int m_cachedAtStart_numAI = -1;
-        private AppDbContext _db;
 
         // TODO: Really, client also shouldnt upload data we arent going to process in this situation, its wasteful
         public bool WasPVPAtStart()
@@ -1479,7 +1475,10 @@ public async Task FinalizeACChecks()
 					try
 					{
 						// create placeholder
-						await Database.MatchHistory.CreatePlaceholderMatchHistory(_db, this);
+						using var scope = ServiceLocator.Services.CreateScope();
+						var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+						await using var db = await factory.CreateDbContextAsync();
+						await Database.MatchHistory.CreatePlaceholderMatchHistory(db, this);
 					}
 					catch (Exception ex)
 					{
@@ -1714,15 +1713,10 @@ public async Task FinalizeACChecks()
 		private Int64 m_NextLobbyID = 0;
 
 		private readonly IServiceProvider _services;
-		private readonly AppDbContext _db;
 
 		public LobbyManager(IServiceProvider services)
 		{
 			_services = services;
-
-            var scope = _services.CreateScope();
-            var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
-            _db = factory.CreateDbContext();
         }
 
         public async Task Cleanup()
@@ -2022,12 +2016,19 @@ public async Task FinalizeACChecks()
 		{
 			try
 			{
+				using var scope = _services.CreateScope();
+				var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
+				await using var db = await factory.CreateDbContextAsync();
+
 				if (lobby.State != ELobbyState.COMPLETE)
 				{
 					await lobby.UpdateState(ELobbyState.COMPLETE);
-					await Database.MatchHistory.CommitLobbyToMatchHistory(_db, lobby);
 				}
 
+				// Persist publication before removing the lobby.
+				await Database.MatchHistory.FinalizeAndScheduleExternalPublication(db, lobby);
+
+				// delete
 				bool bRemoved = m_dictLobbies.Remove(lobby.LobbyID, out _);
 
 				if (bRemoved)
@@ -2035,11 +2036,6 @@ public async Task FinalizeACChecks()
 					WebSocketManager.QueueLobbyListUpdateForViewers(lobby.NetworkRoomID);
 
 					lobby.OnLobbyNeedsDestroyed -= HandleLobbyNeedsDestroyed;
-
-					await Database.MatchHistory.DetermineLobbyWinnerIfNotPresent(_db, lobby);
-
-					// All lobby types are published; only QuickMatch returns ratings.
-					await ExternalLeaderboardsClient.PostMatchResultAsync(_db, lobby);
 				}
 
 				return bRemoved;
