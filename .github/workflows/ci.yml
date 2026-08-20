@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  NUGET_XMLDOC_MODE: skip
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.3xx
+
+      - name: Restore dependencies
+        run: dotnet restore GenOnlineService/GenOnlineService.csproj
+
+      - name: Build Release
+        run: >-
+          dotnet build GenOnlineService/GenOnlineService.csproj
+          --configuration Release
+          --no-restore
+          --warnaserror
+          -p:ContinuousIntegrationBuild=true
+
+  publish:
+    name: Publish ${{ matrix.rid }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            extension: tar.gz
+          - rid: linux-arm64
+            extension: tar.gz
+          - rid: linux-musl-x64
+            extension: tar.gz
+          - rid: linux-musl-arm64
+            extension: tar.gz
+          - rid: osx-x64
+            extension: tar.gz
+          - rid: osx-arm64
+            extension: tar.gz
+          - rid: win-x64
+            extension: zip
+          - rid: win-arm64
+            extension: zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.3xx
+
+      - name: Restore dependencies
+        run: >-
+          dotnet restore GenOnlineService/GenOnlineService.csproj
+          --runtime ${{ matrix.rid }}
+
+      - name: Publish
+        run: >-
+          dotnet publish GenOnlineService/GenOnlineService.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained false
+          --no-restore
+          --output artifacts/publish/${{ matrix.rid }}
+          -p:ContinuousIntegrationBuild=true
+
+      - name: Package Unix artifact
+        if: matrix.extension == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p artifacts/packages
+          tar \
+            --directory "artifacts/publish/${{ matrix.rid }}" \
+            --create \
+            --gzip \
+            --file "artifacts/packages/GenOnlineService-${{ matrix.rid }}.tar.gz" \
+            .
+
+      - name: Package Windows artifact
+        if: matrix.extension == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/packages | Out-Null
+          Compress-Archive -Path "artifacts/publish/${{ matrix.rid }}/*" -DestinationPath "artifacts/packages/GenOnlineService-${{ matrix.rid }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: artifacts/packages/GenOnlineService-${{ matrix.rid }}.${{ matrix.extension }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
