@@ -950,6 +950,9 @@ static class MatchmakingManager
 						await quickMatchLobby.RemoveMember(lobbyMember);
 					}
 				}
+
+				// Clean up slots left behind by disconnected sessions.
+				await lobbyManager.DeleteLobby(quickMatchLobby);
 			}
 
 			WebSocketMessage_Simple requeueAction = new WebSocketMessage_Simple();
