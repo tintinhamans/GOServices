@@ -7,6 +7,44 @@
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
+-- Dumping structure for table go_production.ac_reviews_crc
+CREATE TABLE IF NOT EXISTS `ac_reviews_crc` (
+  `user_id` bigint(20) NOT NULL,
+  `original_crc` varchar(64) NOT NULL,
+  `diff_crc` varchar(64) NOT NULL,
+  `most_recent_match` bigint(20) unsigned NOT NULL,
+  PRIMARY KEY (`user_id`,`original_crc`,`diff_crc`,`most_recent_match`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Dumping structure for table go_production.ac_reviews_modules
+CREATE TABLE IF NOT EXISTS `ac_reviews_modules` (
+  `report_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) unsigned NOT NULL,
+  `match_id` bigint(20) unsigned NOT NULL,
+  `module_name` varchar(128) NOT NULL,
+  `module_path` varchar(512) NOT NULL,
+  `module_size` bigint(20) unsigned NOT NULL,
+  PRIMARY KEY (`report_id`),
+  UNIQUE KEY `user_id_match_id_module_name` (`user_id`,`match_id`,`module_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Dumping structure for table go_production.ac_reviews_new_account_games
+CREATE TABLE IF NOT EXISTS `ac_reviews_new_account_games` (
+  `report_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) unsigned NOT NULL,
+  `match_id` bigint(20) unsigned NOT NULL,
+  PRIMARY KEY (`report_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Dumping structure for table go_production.ac_reviews_probes
+CREATE TABLE IF NOT EXISTS `ac_reviews_probes` (
+  `report_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) unsigned NOT NULL,
+  `match_id` bigint(20) unsigned NOT NULL,
+  `reason` varchar(256) NOT NULL,
+  PRIMARY KEY (`report_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 -- Dumping structure for table go_production.connection_outcomes
 CREATE TABLE IF NOT EXISTS `connection_outcomes` (
   `day_of_year` int(11) NOT NULL DEFAULT 0,
@@ -131,7 +169,7 @@ CREATE TABLE IF NOT EXISTS `match_history` (
 CREATE TABLE IF NOT EXISTS `pending_logins` (
   `code` varchar(32) NOT NULL,
   `state` int(1) NOT NULL,
-  `created` datetime NOT NULL DEFAULT current_timestamp(),
+  `created` datetime(6) NOT NULL,
   `user_id` bigint(20) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -155,9 +193,9 @@ CREATE TABLE IF NOT EXISTS `user_devices` (
   `hwid_1` varchar(128) NOT NULL,
   `hwid_2` varchar(128) NOT NULL,
   `ip_addr` varchar(45) NOT NULL,
-  `hwid_3` varchar(50) DEFAULT 'blank',
-  `hwid_4` varchar(50) DEFAULT NULL,
-  `hwid_5` varchar(50) DEFAULT NULL,
+  `hwid_3` varchar(50) NOT NULL,
+  `hwid_4` varchar(50) NOT NULL,
+  `hwid_5` varchar(50) NOT NULL,
   PRIMARY KEY (`user_id`,`hwid_0`,`hwid_1`,`hwid_2`,`ip_addr`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
@@ -196,24 +234,19 @@ CREATE TABLE IF NOT EXISTS `users` (
   `gamereplays_id` bigint(20) DEFAULT NULL,
   `gamereplays_username` varchar(32) DEFAULT NULL,
   `displayname` varchar(32) DEFAULT NULL,
-  `relay_region` smallint(6) NOT NULL DEFAULT -1,
-  `portmapping_tech` smallint(6) NOT NULL DEFAULT -2,
-  `ipv4` tinyint(1) NOT NULL DEFAULT 0,
-  `ipv6` tinyint(1) NOT NULL DEFAULT 0,
-  `active` tinyint(1) NOT NULL DEFAULT 0,
-  `lastlogin` datetime NOT NULL DEFAULT current_timestamp(),
-  `last_ip` varchar(45) NOT NULL DEFAULT '',
-  `client_id` smallint(5) unsigned NOT NULL DEFAULT 0,
-  `favorite_color` int(11) NOT NULL DEFAULT -1,
-  `favorite_side` int(11) NOT NULL DEFAULT -1,
+  `lastlogin` datetime(6) NOT NULL,
+  `last_ip` varchar(45) DEFAULT NULL,
+  `client_id` int NOT NULL,
+  `favorite_color` int NOT NULL,
+  `favorite_side` int NOT NULL,
   `favorite_map` varchar(128) DEFAULT NULL,
-  `favorite_starting_money` int(11) NOT NULL DEFAULT -1,
-  `favorite_limit_superweapons` int(11) NOT NULL DEFAULT -1,
-  `admin` tinyint(4) NOT NULL DEFAULT 0,
-  `banned` tinyint(4) NOT NULL DEFAULT 0,
-  `elo_rating` int(11) NOT NULL DEFAULT 1000,
-  `monthly_elo_rating` int(11) NOT NULL DEFAULT 1000,
-  `elo_num_matches` int(11) NOT NULL DEFAULT 0,
+  `favorite_starting_money` int NOT NULL,
+  `favorite_limit_superweapons` tinyint(1) NOT NULL,
+  `admin` tinyint(1) NOT NULL,
+  `banned` tinyint(1) NOT NULL,
+  `elo_rating` int NOT NULL,
+  `monthly_elo_rating` int NOT NULL,
+  `elo_num_matches` int NOT NULL,
   `ban_reason` varchar(128) DEFAULT NULL,
   `banned_by` varchar(50) DEFAULT NULL,
   `ban_verified_by` varchar(50) DEFAULT NULL,
