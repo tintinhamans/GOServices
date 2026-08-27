@@ -63,9 +63,9 @@ namespace GenOnlineService.Controllers
 					PropertyNameCaseInsensitive = true,
 				};
 
-				if (System.IO.File.Exists(Path.Combine("config", "motd.txt")))
+				if (System.IO.File.Exists(ConfigurationFiles.GetPath("motd.txt")))
 				{
-					string strFileData = await System.IO.File.ReadAllTextAsync(Path.Combine("config", "motd.txt"));
+					string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("motd.txt"));
 					int numPlayers = GenOnlineService.WebSocketManager.GetNumberOfUsersOnline();
 
 					result.MOTD = String.Format(strFileData, numPlayers);

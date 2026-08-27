@@ -1,0 +1,79 @@
+name: generals-online
+
+services:
+  services:
+    image: generals-online-services:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./appsettings.json
+        target: /app/appsettings.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config
+        target: /app/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data
+        target: /app/data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./crcfiles
+        target: /app/crcfiles
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./exceptions
+        target: /app/Exceptions
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  mariadb:
+    image: mariadb:11.8
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: generals_online
+      MARIADB_USER: generals_online
+      MARIADB_PASSWORD: TODO_CHANGE_ME
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - type: bind
+        source: ../GenOnlineService/Database_Structure/structure.sql
+        target: /docker-entrypoint-initdb.d/001-structure.sql
+        read_only: true
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  mariadb-data:

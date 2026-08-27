@@ -923,7 +923,8 @@ namespace GenOnlineService
 			ThreadPool.SetMinThreads(200, 200);
 
 			var builder = WebApplication.CreateBuilder(args);
-			RoomCatalog.Initialize(Path.Combine(builder.Environment.ContentRootPath, "config", "rooms.json"));
+			ConfigurationFiles.Initialize(builder.Environment.ContentRootPath);
+			RoomCatalog.Initialize(ConfigurationFiles.GetPath("rooms.json"));
 
 			// Add services to the container.
 

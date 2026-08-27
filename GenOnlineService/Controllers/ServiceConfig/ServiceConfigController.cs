@@ -42,7 +42,7 @@ namespace GenOnlineService.Controllers
 		{
 			try
 			{
-				string strFileData = await System.IO.File.ReadAllTextAsync(Path.Combine("config", "serviceconfig.json"));
+				string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("serviceconfig.json"));
 
 				Response.StatusCode = (int)HttpStatusCode.OK;
 				return strFileData;
@@ -70,7 +70,7 @@ namespace GenOnlineService.Controllers
 		{
 			try
 			{
-				string strFileData = await System.IO.File.ReadAllTextAsync(Path.Combine("config", "anticheatconfig.dat"));
+				string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("anticheatconfig.dat"));
 
 				// 0 = normal behavior
 				// 1 = force goac

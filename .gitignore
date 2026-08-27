@@ -56,3 +56,13 @@ nunit-*.xml
 .vs/*
 */.vs/*
 *.csproj.user
+
+# Local service data
+GenOnlineService/data/GeoLite2-City.mmdb
+
+# Local container deployment state
+docker/appsettings.json
+docker/crcfiles/
+docker/config/
+docker/data/
+docker/exceptions/
