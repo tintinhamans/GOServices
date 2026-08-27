@@ -1677,9 +1677,7 @@ namespace GenOnlineService
 
 		public async static Task SetUsedLoggedIn(Int64 userID, KnownClients.EKnownClients clientID, EUserSessionType sessionType)
 		{
-			// TODO_EFCORE: website uses this index as 1 (60hz) to 0 (30hz), update it to use new enum + support new clients, also need to update DB to match
 			// TODO_EFCORE: Move away from db for this and just have website login call endpoint on service
-			//UInt16 clientID = clientIDStr == "gen_online_60hz" ? (UInt16)1 : (UInt16)0;
 
 			Console.ForegroundColor = ConsoleColor.Cyan;
 			Console.WriteLine("StartSession deleing other sessions for user {0}", userID);

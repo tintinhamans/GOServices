@@ -17,9 +17,8 @@
 */
 
 using Microsoft.AspNetCore.Mvc;
-using System;
-using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace GenOnlineService.Controllers
 {
@@ -28,14 +27,13 @@ namespace GenOnlineService.Controllers
 		OK = 0,
 		Failed = 1,
 		NeedsUpdate = 2
-	};
+	}
 
 	public abstract class APIResult
 	{
 		public string Serialize()
 		{
-			string strRetVal = JsonSerializer.Serialize(Convert.ChangeType(this, GetReturnType()));
-			return strRetVal;
+			return JsonSerializer.Serialize(this, GetReturnType());
 		}
 
 		public abstract Type GetReturnType();
@@ -49,51 +47,19 @@ namespace GenOnlineService.Controllers
 		}
 
 		public EVersionCheckResult result { get; set; } = EVersionCheckResult.Failed;
-		public string patcher_name { get; set; } = String.Empty;
-		public string patcher_path { get; set; } = String.Empty;
-		public Int64 patcher_size { get; set; } = 0;
+		public string patcher_name { get; set; } = string.Empty;
+		public string patcher_path { get; set; } = string.Empty;
+		public long patcher_size { get; set; }
 	}
 
 	public class GET_VersionManifest_Result : APIResult
 	{
-		public override Type GetReturnType() { return typeof(GET_VersionManifest_Result); }
-		public UInt32 execrc_30 { get; set; } = 0;
-		public UInt32 execrc_60 { get; set; } = 0;
-	}
-
-	// legacy version checker
-	[ApiController]
-	[Route("/cloud/env:prod/VersionCheck")]
-	public class VersionCheckLegacyController : ControllerBase
-	{
-		private readonly ILogger<VersionCheckLegacyController> _logger;
-		private readonly ConfigurationFileCache _configurationFiles;
-		private readonly FileCrcCache _fileCrcs;
-
-		public VersionCheckLegacyController(
-			ILogger<VersionCheckLegacyController> logger,
-			ConfigurationFileCache configurationFiles,
-			FileCrcCache fileCrcs)
+		public override Type GetReturnType()
 		{
-			_logger = logger;
-			_configurationFiles = configurationFiles;
-			_fileCrcs = fileCrcs;
+			return typeof(GET_VersionManifest_Result);
 		}
 
-		[HttpPost(Name = "PostVersionCheckLegacy")]
-		public async Task<APIResult> Post()
-		{
-			using (var reader = new StreamReader(HttpContext.Request.Body))
-			{
-				string jsonData = await reader.ReadToEndAsync();
-
-#if !DEBUG
-				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
-#else
-				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
-#endif
-			}
-		}
+		public uint execrc_60 { get; set; }
 	}
 
 	[ApiController]
@@ -110,18 +76,9 @@ namespace GenOnlineService.Controllers
 		}
 
 		[HttpPost(Name = "PostVersionCheck")]
-		public async Task<APIResult> Post()
+		public Task<APIResult> Post()
 		{
-			using (var reader = new StreamReader(HttpContext.Request.Body))
-			{
-				string jsonData = await reader.ReadToEndAsync();
-
-#if !DEBUG
-				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
-#else
-				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
-#endif
-			}
+			return VersionHelper.CheckVersion(Request.Body, _configurationFiles, _fileCrcs);
 		}
 	}
 
@@ -137,166 +94,166 @@ namespace GenOnlineService.Controllers
 		}
 
 		[HttpGet(Name = "GetVersionManifest")]
-		public async Task<APIResult> Get()
+		public APIResult Get()
 		{
-			return await Task.FromResult(VersionHelper.Get_ManifestHandler(_fileCrcs));
+			return VersionHelper.GetManifest(_fileCrcs);
 		}
 	}
 
-	class VersionHelper
+	internal static class VersionHelper
 	{
-		public static APIResult Get_ManifestHandler(FileCrcCache fileCrcs)
-		{
-			GET_VersionManifest_Result manifest = new GET_VersionManifest_Result();
-#if DEBUG
-			manifest.execrc_30 = 0;
-			manifest.execrc_60 = 0;
+		private const string ClientExecutableName = "OutpostOnlineZH_60.exe";
+
+#if DEBUG && !LARGE_PATCH_TEST
+		private const bool EnforceVersionCheck = false;
 #else
-			try
-			{
-				manifest.execrc_30 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
-				manifest.execrc_60 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
-			}
-			catch (Exception)
-			{
-				// Keep default 0 values on failure
-			}
+		private const bool EnforceVersionCheck = true;
 #endif
-			return manifest;
+
+		private static readonly HttpClient HttpClient = new();
+		private static readonly JsonSerializerOptions JsonOptions = new()
+		{
+			NumberHandling = JsonNumberHandling.AllowReadingFromString,
+			PropertyNameCaseInsensitive = true
+		};
+
+		public static APIResult GetManifest(FileCrcCache fileCrcs)
+		{
+			return new GET_VersionManifest_Result
+			{
+				execrc_60 = CalculateClientExecutableCrc(fileCrcs)
+			};
 		}
 
-#if !DEBUG
-		public static async Task<APIResult> Post_InternalHandler(string jsonData, ConfigurationFileCache configurationFiles, FileCrcCache fileCrcs)
-#else
-		public static async Task<APIResult> Post_InternalHandler(string jsonData, ConfigurationFileCache configurationFiles, FileCrcCache fileCrcs)
-#endif
+		public static async Task<APIResult> CheckVersion(
+			Stream requestBody,
+			ConfigurationFileCache configurationFiles,
+			FileCrcCache fileCrcs)
 		{
-			POST_VersionCheck_Result result = new POST_VersionCheck_Result();
+			using StreamReader reader = new(requestBody);
+			return await CheckVersion(await reader.ReadToEndAsync(), configurationFiles, fileCrcs);
+		}
 
-			var options = new JsonSerializerOptions
-			{
-				PropertyNameCaseInsensitive = true
-			};
+		public static async Task<APIResult> CheckVersion(
+			string jsonData,
+			ConfigurationFileCache configurationFiles,
+			FileCrcCache fileCrcs)
+		{
+			POST_VersionCheck_Result result = new();
 
 			try
 			{
-				var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonData, options);
-
-				if (data != null && data.ContainsKey("ver") && data.ContainsKey("netver") && data.ContainsKey("servicesver"))
-				{
-					if (UInt32.TryParse(data["execrc"].ToString(), out UInt32 execrc)
-						&& Int32.TryParse(data["ver"].ToString(), out int ver)
-						&& Int32.TryParse(data["netver"].ToString(), out int netver)
-						&& Int32.TryParse(data["servicesver"].ToString(), out int servicesver))
-					{
-						// TODO: Check this exists on startup for safety
-						// TODO: maybe cache it?
-#if DEBUG
-						UInt32 calculatedCRC_Exe_30 = 0;
-						UInt32 calculatedCRC_Exe_60 = 0;
-#else
-						UInt32 calculatedCRC_Exe_30 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
-						UInt32 calculatedCRC_Exe_60 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
-#endif
-
-#if DEBUG
-#if LARGE_PATCH_TEST
-						const bool bDoCRCChecks = true;
-#else
-						const bool bDoCRCChecks = false;
-#endif
-#else
-						const bool bDoCRCChecks = true;
-#endif
-
-						// TODO: Service should have pulses on lobby from members and remove if they dont do within X seconds
-
-						bool bVersionMatches = ver == Constants.GENERALS_ONLINE_VERSION;
-						bool bNetVersionMatches = netver == Constants.GENERALS_ONLINE_NET_VERSION;
-						bool bServicesVersionMatches = servicesver == Constants.GENERALS_ONLINE_SERVICE_VERSION;
-						bool bExeCRCMatches = execrc == calculatedCRC_Exe_30 || execrc == calculatedCRC_Exe_60;
-
-						if (!bDoCRCChecks || (bVersionMatches && bNetVersionMatches && bServicesVersionMatches && bExeCRCMatches))
-						{
-							result.result = EVersionCheckResult.OK;
-						}
-						else
-						{
-							var jsonPatchData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(configurationFiles.GetContents("patchdata.json"), options);
-
-							if (jsonPatchData != null)
-							{
-								result.patcher_name = jsonPatchData["patcher_name"].ToString();
-								result.patcher_path = jsonPatchData["patcher_path"].ToString();
-
-#if !DEBUG
-								string strPatcherPath = Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", result.patcher_name);
-								//string strPatchPath = Path.Combine(Directory.GetCurrentDirectory(), "..", "..", "public_html", "updater", "v1.gopatch");
-
-								result.patcher_size = (UInt32)new FileInfo(strPatcherPath).Length;
-#else
-							// large patch test
-#if LARGE_PATCH_TEST
-							result.patcher_path = "http://ipv4.download.thinkbroadband.com/100MB.zip";
-
-							result.patcher_size = 100 * 1048576;
-#else
-
-							// TODO: Client should probably just make HEAD requests later
-							// debug hack... since we dont have local data
-
-							async Task<long> GetHTTPSize(string url)
-							{
-								using (System.Net.Http.HttpClient client = new System.Net.Http.HttpClient())
-								{
-									try
-									{
-										HttpRequestMessage request = new HttpRequestMessage(System.Net.Http.HttpMethod.Head, url);
-										HttpResponseMessage response = await client.SendAsync(request);
-
-										if (response.IsSuccessStatusCode && response.Content.Headers.ContentLength.HasValue)
-										{
-											return response.Content.Headers.ContentLength.Value;
-										}
-									}
-									catch (HttpRequestException)
-									{
-										// TODO: Log exception or handle error
-									}
-
-									return -1; // Return -1 if the size could not be determined
-								}
-							}
-
-							result.patcher_size = await GetHTTPSize(result.patcher_path);
-#endif
-
-#endif
-
-								result.result = EVersionCheckResult.NeedsUpdate;
-							}
-							else
-							{
-								result.result = EVersionCheckResult.Failed;
-							}
-						}
-					}
-					else
-					{
-						result.result = EVersionCheckResult.Failed;
-					}
-				}
-				else
+				VersionCheckRequest? request = JsonSerializer.Deserialize<VersionCheckRequest>(jsonData, JsonOptions);
+				if (request?.execrc is not uint executableCrc
+					|| request.ver is not int version
+					|| request.netver is not int networkVersion
+					|| request.servicesver is not int servicesVersion)
 				{
 					return result;
 				}
+
+				bool versionMatches = version == Constants.GENERALS_ONLINE_VERSION;
+				bool networkVersionMatches = networkVersion == Constants.GENERALS_ONLINE_NET_VERSION;
+				bool servicesVersionMatches = servicesVersion == Constants.GENERALS_ONLINE_SERVICE_VERSION;
+				bool executableMatches = executableCrc == CalculateClientExecutableCrc(fileCrcs);
+
+				if (!EnforceVersionCheck
+					|| (versionMatches && networkVersionMatches && servicesVersionMatches && executableMatches))
+				{
+					result.result = EVersionCheckResult.OK;
+					return result;
+				}
+
+				PatchData? patchData = JsonSerializer.Deserialize<PatchData>(
+					configurationFiles.GetContents("patchdata.json"),
+					JsonOptions);
+
+				if (patchData == null
+					|| string.IsNullOrWhiteSpace(patchData.patcher_name)
+					|| string.IsNullOrWhiteSpace(patchData.patcher_path))
+				{
+					return result;
+				}
+
+				result.patcher_name = patchData.patcher_name;
+				result.patcher_path = patchData.patcher_path;
+				result.patcher_size = await GetPatcherSize(result);
+				result.result = EVersionCheckResult.NeedsUpdate;
 			}
-			catch
+			catch (JsonException)
+			{
+				return result;
+			}
+			catch (IOException)
+			{
+				return result;
+			}
+			catch (UnauthorizedAccessException)
 			{
 				return result;
 			}
 
 			return result;
+		}
+
+		private static uint CalculateClientExecutableCrc(FileCrcCache fileCrcs)
+		{
+#if DEBUG
+			return 0;
+#else
+			return fileCrcs.Get(GetCrcFilePath(ClientExecutableName));
+#endif
+		}
+
+		private static Task<long> GetPatcherSize(POST_VersionCheck_Result result)
+		{
+#if !DEBUG
+			return Task.FromResult(new FileInfo(GetCrcFilePath(result.patcher_name)).Length);
+#elif LARGE_PATCH_TEST
+			result.patcher_path = "http://ipv4.download.thinkbroadband.com/100MB.zip";
+			return Task.FromResult(100L * 1048576);
+#else
+			return GetHttpSize(result.patcher_path);
+#endif
+		}
+
+		private static async Task<long> GetHttpSize(string url)
+		{
+			try
+			{
+				using HttpRequestMessage request = new(HttpMethod.Head, url);
+				using HttpResponseMessage response = await HttpClient.SendAsync(request);
+
+				if (response.IsSuccessStatusCode && response.Content.Headers.ContentLength.HasValue)
+				{
+					return response.Content.Headers.ContentLength.Value;
+				}
+			}
+			catch (HttpRequestException)
+			{
+				return -1;
+			}
+
+			return -1;
+		}
+
+		private static string GetCrcFilePath(string fileName)
+		{
+			return Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", fileName);
+		}
+
+		private sealed class VersionCheckRequest
+		{
+			public uint? execrc { get; set; }
+			public int? ver { get; set; }
+			public int? netver { get; set; }
+			public int? servicesver { get; set; }
+		}
+
+		private sealed class PatchData
+		{
+			public string patcher_name { get; set; } = string.Empty;
+			public string patcher_path { get; set; } = string.Empty;
 		}
 	}
 }

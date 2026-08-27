@@ -262,12 +262,7 @@ namespace GenOnlineService.Controllers
 		[Route("VersionCheck")]
 		[Authorize(Roles = "Monitor")]
 		[HttpGet]
-		// TODO: Undo all of these and make all flows use gethttpsize/head
-#if !DEBUG
 		public async Task<APIResult?> Monitor_VersionCheck()
-#else
-		public async Task<APIResult?> Monitor_VersionCheck()
-#endif
 		{
 			if (!this.User.IsInRole("Monitor"))
 			{
@@ -275,15 +270,12 @@ namespace GenOnlineService.Controllers
 			}
 			else
 			{
-				// db call
 				try
 				{
-#if !DEBUG
-				APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}", _configurationFiles, _fileCrcs);
-#else
-					APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}", _configurationFiles, _fileCrcs);
-#endif
-
+					APIResult internalResult = await VersionHelper.CheckVersion(
+						"{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}",
+						_configurationFiles,
+						_fileCrcs);
 					return internalResult;
 				}
 				catch
