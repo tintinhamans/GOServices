@@ -18,7 +18,6 @@
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Net;
 
 namespace GenOnlineService.Controllers
 {
@@ -39,38 +38,6 @@ namespace GenOnlineService.Controllers
 		public string Get()
 		{
 			return _configurationFiles.GetContents("serviceconfig.json");
-		}
-	}
-
-	[ApiController]
-	[Route("env/{environment}/contract/{contract_version}/[controller]")]
-	public class AnticheatConfigController : ControllerBase
-	{
-		public AnticheatConfigController()
-		{
-
-		}
-
-		[HttpGet(Name = "GetAnticheatConfig")]
-
-		public async Task<string?> Get()
-		{
-			try
-			{
-				string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("anticheatconfig.dat"));
-
-				// 0 = normal behavior
-				// 1 = force goac
-				// 2 = force eac
-
-				Response.StatusCode = (int)HttpStatusCode.OK;
-				return strFileData;
-			}
-			catch
-			{
-				Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-				return null;
-			}
 		}
 	}
 }
