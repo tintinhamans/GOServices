@@ -73,6 +73,7 @@ The main settings are in [`appsettings.json`](GenOnlineService/appsettings.json)
     <tr><td><code>CertificateKeyPath</code></td><td>Certificate key file used when <code>UseSystemCertificateStore</code> is false.</td></tr>
     <tr><td><code>EnforceHttps</code></td><td>Adds HSTS and redirects normal HTTP requests to HTTPS.</td></tr>
     <tr><td><code>DisableFullMeshCheck</code></td><td>Skips lobby connection checks.</td></tr>
+    <tr><td><code>GeoIP</code></td><td><code>DatabasePath</code></td><td>Path to the MaxMind GeoIP City database.</td></tr>
     <tr><td rowspan="4"><code>Turn</code></td><td><code>Key</code></td><td>Cloudflare TURN key.</td></tr>
     <tr><td><code>Token</code></td><td>Cloudflare TURN API token.</td></tr>
     <tr><td><code>TokenTtl</code></td><td>TURN credential lifetime.</td></tr>

@@ -16,7 +16,6 @@
 **    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-using MaxMind.GeoIP2;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Cors.Infrastructure;
@@ -924,7 +923,7 @@ namespace GenOnlineService
 			ThreadPool.SetMinThreads(200, 200);
 
 			var builder = WebApplication.CreateBuilder(args);
-			RoomCatalog.Initialize(Path.Combine(builder.Environment.ContentRootPath, "data", "rooms.json"));
+			RoomCatalog.Initialize(Path.Combine(builder.Environment.ContentRootPath, "config", "rooms.json"));
 
 			// Add services to the container.
 
@@ -999,6 +998,7 @@ namespace GenOnlineService
 			}
 
 			builder.Services.AddHostedService<ExternalLeaderboardPublicationWorker>();
+			builder.Services.AddSingleton<GeoIpDatabase>();
 			builder.Services.AddSingleton<LobbyManager>();
 
 			var rateLimitingSettings = Program.g_Config.GetSection("RateLimiting");

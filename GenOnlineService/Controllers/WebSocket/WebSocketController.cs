@@ -17,7 +17,6 @@
 */
 
 using Discord;
-using MaxMind.GeoIP2;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -34,11 +33,13 @@ namespace GenOnlineService.Controllers
 	{
 		private readonly LobbyManager _lobbyManager;
 		private readonly IDbContextFactory<AppDbContext> _dbFactory;
+		private readonly GeoIpDatabase _geoIpDatabase;
 
-		public WebSocketController(LobbyManager lobbyManager, IDbContextFactory<AppDbContext> dbFactory)
+		public WebSocketController(LobbyManager lobbyManager, IDbContextFactory<AppDbContext> dbFactory, GeoIpDatabase geoIpDatabase)
 		{
 			_lobbyManager = lobbyManager;
 			_dbFactory = dbFactory;
+			_geoIpDatabase = geoIpDatabase;
 		}
 
 		private static readonly JsonSerializerOptions JsonOpts = new()
@@ -133,24 +134,6 @@ namespace GenOnlineService.Controllers
 				"That moderation action is not supported.", "unsupported_action");
 		}
 
-		// GeoIP DB is designed to be reused; opening per request is expensive.
-		// It is gitignored and absent in fresh clones, so a failure to open must
-		// fall back to the lookup defaults rather than fail static init.
-		private static readonly DatabaseReader? GeoIpReader = TryOpenGeoIp();
-
-		private static DatabaseReader? TryOpenGeoIp()
-		{
-			try
-			{
-				return new DatabaseReader("data/GeoLite2-City.mmdb");
-			}
-			catch (Exception ex)
-			{
-				Console.WriteLine($"[WS] GeoIP DB unavailable ({ex.Message}); using fallback coordinates");
-				return null;
-			}
-		}
-
 		private struct WSMessageEnvelope
 		{
 			public int msg_id { get; set; }
@@ -189,9 +172,9 @@ namespace GenOnlineService.Controllers
 
 			try
 			{
-				if (GeoIpReader != null)
+				if (_geoIpDatabase.Reader != null)
 				{
-					var city = GeoIpReader.City(ipAddress);
+					var city = _geoIpDatabase.Reader.City(ipAddress);
 
 					ipContinent = city.Continent.Code;
 					ipCountry = city.Country.IsoCode;

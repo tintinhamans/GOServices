@@ -205,7 +205,7 @@ namespace GenOnlineService.Controllers
 						}
 						else
 						{
-							var jsonPatchData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(await System.IO.File.ReadAllTextAsync(Path.Combine("data", "patchdata.json")), options);
+							var jsonPatchData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(await System.IO.File.ReadAllTextAsync(Path.Combine("config", "patchdata.json")), options);
 
 							if (jsonPatchData != null)
 							{
