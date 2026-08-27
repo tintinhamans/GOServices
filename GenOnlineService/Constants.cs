@@ -1649,7 +1649,7 @@ namespace GenOnlineService
 			Console.ForegroundColor = ConsoleColor.Gray;
 
 			// invalidate any TURN credentials
-			TURNCredentialManager.DeleteCredentialsForUser(user_id);
+			await TURNCredentialManager.DeleteCredentialsForUser(user_id);
 
 			// TODO: Implement single point of presence? gets dicey if multiple logins
 			// TODO: Dont destroy this, just mark inactive/offline, we use this as a saved credential system
@@ -2561,11 +2561,12 @@ namespace GenOnlineService
 	{
 		private static ConcurrentDictionary<Int64, string> g_DictTURNUsernames = new();
 
-		private static void GetTurnConfig(out int tokenTtl, out string token, out string key, out bool automaticallyInvalidateTokens)
+		private static bool TryGetTurnConfig(out int tokenTtl, out string token, out string key, out bool automaticallyInvalidateTokens)
 		{
 			tokenTtl = -1;
 			token = String.Empty;
 			key = String.Empty;
+			automaticallyInvalidateTokens = false;
 
 			if (Program.g_Config == null)
 			{
@@ -2583,6 +2584,11 @@ namespace GenOnlineService
 			string? configuredToken = turnSettings.GetValue<string>("Token");
 			int? configuredTokenTtl = turnSettings.GetValue<int?>("TokenTtl");
 			bool? configuredAutomaticInvalidation = turnSettings.GetValue<bool?>("AutomaticallyInvalidateTokens");
+
+			if (configuredKey == null && configuredToken == null)
+			{
+				return false;
+			}
 
 			if (configuredKey == null)
 			{
@@ -2608,6 +2614,8 @@ namespace GenOnlineService
 			token = configuredToken;
 			key = configuredKey;
 			automaticallyInvalidateTokens = configuredAutomaticInvalidation.Value;
+
+			return true;
 		}
 
 		public static async Task<TURNCredentialContainer?> CreateCredentialsForUser(Int64 userID)
@@ -2617,7 +2625,10 @@ namespace GenOnlineService
 			await Task.Delay(1);
 			return fakeCreds;
 #endif
-			GetTurnConfig(out int turnTokenTtl, out string turnToken, out string turnKey, out _);
+			if (!TryGetTurnConfig(out int turnTokenTtl, out string turnToken, out string turnKey, out _))
+			{
+				return null;
+			}
 
 			// we should only have 1 turn credential at a time... clean it up
 			if (g_DictTURNUsernames.ContainsKey(userID))
@@ -2726,9 +2737,7 @@ namespace GenOnlineService
             return;
 #endif
 
-			GetTurnConfig(out _, out string turnToken, out string turnKey, out bool automaticallyInvalidateTokens);
-
-			if (!automaticallyInvalidateTokens)
+			if (!TryGetTurnConfig(out _, out string turnToken, out string turnKey, out bool automaticallyInvalidateTokens) || !automaticallyInvalidateTokens)
 			{
 				return;
 			}

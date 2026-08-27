@@ -249,7 +249,7 @@ namespace GenOnlineService.Controllers
 						_lobbyManager.LeaveAnyLobby(user_id);
 
 						// cleanup TURN credentials
-						TURNCredentialManager.DeleteCredentialsForUser(user_id);
+						await TURNCredentialManager.DeleteCredentialsForUser(user_id);
 
 						// clear our lobby ID
 						UserSession? sourceData = WebSocketManager.GetSessionFromUser(user_id, sessionType);
@@ -576,7 +576,7 @@ namespace GenOnlineService.Controllers
 											_lobbyManager.LeaveSpecificLobby(KickedUserID, lobbyID);
 
 											// cleanup TURN credentials
-											TURNCredentialManager.DeleteCredentialsForUser(KickedUserID);
+											await TURNCredentialManager.DeleteCredentialsForUser(KickedUserID);
 
 											// clear our lobby ID
 											UserSession? sourceData = WebSocketManager.GetSessionFromUser(KickedUserID, EUserSessionType.GameClient); // user being kicked must be a game client
