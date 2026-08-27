@@ -67,10 +67,17 @@ namespace GenOnlineService.Controllers
 	public class VersionCheckLegacyController : ControllerBase
 	{
 		private readonly ILogger<VersionCheckLegacyController> _logger;
+		private readonly ConfigurationFileCache _configurationFiles;
+		private readonly FileCrcCache _fileCrcs;
 
-		public VersionCheckLegacyController(ILogger<VersionCheckLegacyController> logger)
+		public VersionCheckLegacyController(
+			ILogger<VersionCheckLegacyController> logger,
+			ConfigurationFileCache configurationFiles,
+			FileCrcCache fileCrcs)
 		{
 			_logger = logger;
+			_configurationFiles = configurationFiles;
+			_fileCrcs = fileCrcs;
 		}
 
 		[HttpPost(Name = "PostVersionCheckLegacy")]
@@ -81,9 +88,9 @@ namespace GenOnlineService.Controllers
 				string jsonData = await reader.ReadToEndAsync();
 
 #if !DEBUG
-				return await VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
 #else
-				return await VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
 #endif
 			}
 		}
@@ -93,23 +100,26 @@ namespace GenOnlineService.Controllers
 	[Route("env/{environment}/contract/{contract_version}/[controller]")]
 	public class VersionCheckController : ControllerBase
 	{
+		private readonly ConfigurationFileCache _configurationFiles;
+		private readonly FileCrcCache _fileCrcs;
 
-		public VersionCheckController()
+		public VersionCheckController(ConfigurationFileCache configurationFiles, FileCrcCache fileCrcs)
 		{
-
+			_configurationFiles = configurationFiles;
+			_fileCrcs = fileCrcs;
 		}
 
 		[HttpPost(Name = "PostVersionCheck")]
 		public async Task<APIResult> Post()
-		{		
+		{
 			using (var reader = new StreamReader(HttpContext.Request.Body))
 			{
 				string jsonData = await reader.ReadToEndAsync();
 
 #if !DEBUG
-				return await VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
 #else
-				return await VersionHelper.Post_InternalHandler(jsonData);
+				return await VersionHelper.Post_InternalHandler(jsonData, _configurationFiles, _fileCrcs);
 #endif
 			}
 		}
@@ -119,16 +129,23 @@ namespace GenOnlineService.Controllers
 	[Route("env/{environment}/contract/{contract_version}/[controller]")]
 	public class VersionManifestController : ControllerBase
 	{
+		private readonly FileCrcCache _fileCrcs;
+
+		public VersionManifestController(FileCrcCache fileCrcs)
+		{
+			_fileCrcs = fileCrcs;
+		}
+
 		[HttpGet(Name = "GetVersionManifest")]
 		public async Task<APIResult> Get()
 		{
-			return await Task.FromResult(VersionHelper.Get_ManifestHandler());
+			return await Task.FromResult(VersionHelper.Get_ManifestHandler(_fileCrcs));
 		}
 	}
 
 	class VersionHelper
 	{
-		public static APIResult Get_ManifestHandler()
+		public static APIResult Get_ManifestHandler(FileCrcCache fileCrcs)
 		{
 			GET_VersionManifest_Result manifest = new GET_VersionManifest_Result();
 #if DEBUG
@@ -137,8 +154,8 @@ namespace GenOnlineService.Controllers
 #else
 			try
 			{
-				manifest.execrc_30 = CRC32Calculator.CalculateCRC32(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
-				manifest.execrc_60 = CRC32Calculator.CalculateCRC32(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
+				manifest.execrc_30 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
+				manifest.execrc_60 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
 			}
 			catch (Exception)
 			{
@@ -149,9 +166,9 @@ namespace GenOnlineService.Controllers
 		}
 
 #if !DEBUG
-		public static async Task<APIResult> Post_InternalHandler(string jsonData)
+		public static async Task<APIResult> Post_InternalHandler(string jsonData, ConfigurationFileCache configurationFiles, FileCrcCache fileCrcs)
 #else
-		public static async Task<APIResult> Post_InternalHandler(string jsonData)
+		public static async Task<APIResult> Post_InternalHandler(string jsonData, ConfigurationFileCache configurationFiles, FileCrcCache fileCrcs)
 #endif
 		{
 			POST_VersionCheck_Result result = new POST_VersionCheck_Result();
@@ -178,8 +195,8 @@ namespace GenOnlineService.Controllers
 						UInt32 calculatedCRC_Exe_30 = 0;
 						UInt32 calculatedCRC_Exe_60 = 0;
 #else
-						UInt32 calculatedCRC_Exe_30 = CRC32Calculator.CalculateCRC32(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
-						UInt32 calculatedCRC_Exe_60 = CRC32Calculator.CalculateCRC32(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
+						UInt32 calculatedCRC_Exe_30 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_30.exe"));
+						UInt32 calculatedCRC_Exe_60 = fileCrcs.Get(Path.Combine(Directory.GetCurrentDirectory(), "crcfiles", "GeneralsOnlineZH_60.exe"));
 #endif
 
 #if DEBUG
@@ -205,7 +222,7 @@ namespace GenOnlineService.Controllers
 						}
 						else
 						{
-							var jsonPatchData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("patchdata.json")), options);
+							var jsonPatchData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(configurationFiles.GetContents("patchdata.json"), options);
 
 							if (jsonPatchData != null)
 							{

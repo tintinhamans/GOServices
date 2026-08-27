@@ -105,11 +105,19 @@ namespace GenOnlineService.Controllers
 	{
 		private readonly IDbContextFactory<AppDbContext> _dbFactory;
 		private readonly ILogger<MonitoringController> _logger;
+		private readonly ConfigurationFileCache _configurationFiles;
+		private readonly FileCrcCache _fileCrcs;
 
-		public MonitoringController(IDbContextFactory<AppDbContext> dbFactory, ILogger<MonitoringController> logger)
+		public MonitoringController(
+			IDbContextFactory<AppDbContext> dbFactory,
+			ILogger<MonitoringController> logger,
+			ConfigurationFileCache configurationFiles,
+			FileCrcCache fileCrcs)
 		{
 			_logger = logger;
 			_dbFactory = dbFactory;
+			_configurationFiles = configurationFiles;
+			_fileCrcs = fileCrcs;
 		}
 
 		[Route("ActiveUsers")]
@@ -270,11 +278,10 @@ namespace GenOnlineService.Controllers
 				// db call
 				try
 				{
-					GenOnlineService.Controllers.VersionCheckController versionCheckController = new GenOnlineService.Controllers.VersionCheckController();
 #if !DEBUG
-				APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}");
+				APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}", _configurationFiles, _fileCrcs);
 #else
-					APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}");
+					APIResult internalResult = await VersionHelper.Post_InternalHandler("{\"execrc\": 1234567890, \"ver\": 1, \"netver\": 2, \"servicesver\": 3}", _configurationFiles, _fileCrcs);
 #endif
 
 					return internalResult;

@@ -18,11 +18,7 @@
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 using System;
-using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
 
 namespace GenOnlineService.Controllers
 {
@@ -43,37 +39,26 @@ namespace GenOnlineService.Controllers
 	[Route("env/{environment}/contract/{contract_version}/[controller]")]
 	public class MOTDController : ControllerBase
 	{
-		private readonly ILogger<MOTDController> _logger;
+		private readonly ConfigurationFileCache _configurationFiles;
 
-		public MOTDController(ILogger<MOTDController> logger)
+		public MOTDController(ConfigurationFileCache configurationFiles)
 		{
-			_logger = logger;
+			_configurationFiles = configurationFiles;
 		}
 
 		[HttpGet(Name = "GetMOTD")]
 
-		public async Task<APIResult> Get()
+		public APIResult Get()
 		{
 			RouteHandler_GET_MOTD_Result result = new RouteHandler_GET_MOTD_Result();
 
 			try
 			{
-				var options = new JsonSerializerOptions
-				{
-					PropertyNameCaseInsensitive = true,
-				};
-
-				if (System.IO.File.Exists(ConfigurationFiles.GetPath("motd.txt")))
-				{
-					string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("motd.txt"));
-					int numPlayers = GenOnlineService.WebSocketManager.GetNumberOfUsersOnline();
-
-					result.MOTD = String.Format(strFileData, numPlayers);
-				}
-					
-
+				string template = _configurationFiles.GetContents("motd.txt");
+				int numPlayers = GenOnlineService.WebSocketManager.GetNumberOfUsersOnline();
+				result.MOTD = String.Format(template, numPlayers);
 			}
-			catch
+			catch (FormatException)
 			{
 				return result;
 			}

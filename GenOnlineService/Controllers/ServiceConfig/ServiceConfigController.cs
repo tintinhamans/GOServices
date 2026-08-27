@@ -18,11 +18,7 @@
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System;
 using System.Net;
-using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
 
 namespace GenOnlineService.Controllers
 {
@@ -31,27 +27,18 @@ namespace GenOnlineService.Controllers
 	[Route("env/{environment}/contract/{contract_version}/[controller]")]
 	public class ServiceConfigController : ControllerBase
 	{
-		public ServiceConfigController()
+		private readonly ConfigurationFileCache _configurationFiles;
+
+		public ServiceConfigController(ConfigurationFileCache configurationFiles)
 		{
-			
+			_configurationFiles = configurationFiles;
 		}
 
 		[HttpGet(Name = "GetServiceConfig")]
 
-		public async Task<string?> Get()
+		public string Get()
 		{
-			try
-			{
-				string strFileData = await System.IO.File.ReadAllTextAsync(ConfigurationFiles.GetPath("serviceconfig.json"));
-
-				Response.StatusCode = (int)HttpStatusCode.OK;
-				return strFileData;
-			}
-			catch
-			{
-				Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-				return null;
-			}
+			return _configurationFiles.GetContents("serviceconfig.json");
 		}
 	}
 

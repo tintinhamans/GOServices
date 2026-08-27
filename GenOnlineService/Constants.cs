@@ -180,22 +180,32 @@ namespace GenOnlineService
 			RespectNullableAnnotations = true
 		};
 
-		private static RoomCatalogData? s_catalog;
+		private static volatile RoomCatalogData? s_catalog;
 
 		internal static IReadOnlyList<RoomCatalogEntry> Rooms => Current.Rooms;
 		private static RoomCatalogData Current => s_catalog
 			?? throw new InvalidOperationException("The room catalog has not been initialized.");
 
-		public static void Initialize(string catalogPath)
+		public static void Initialize(ConfigurationFileCache configurationFiles)
 		{
 			try
 			{
-				s_catalog = CreateFromJson(File.ReadAllText(catalogPath));
+				s_catalog = CreateFromJson(configurationFiles.GetContents("rooms.json"));
 			}
-			catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+			catch (Exception ex) when (ex is JsonException or InvalidDataException)
 			{
-				throw new InvalidDataException($"Failed to load room catalog '{catalogPath}': {ex.Message}", ex);
+				throw new InvalidDataException($"Failed to load room catalog: {ex.Message}", ex);
 			}
+
+			configurationFiles.Changed += (fileName, contents) =>
+			{
+				if (!fileName.Equals("rooms.json", StringComparison.OrdinalIgnoreCase))
+				{
+					return;
+				}
+
+				s_catalog = CreateFromJson(contents);
+			};
 		}
 
 		public static bool TryResolveTargetRoomID(int selectedRoomID, out Int16 targetRoomID)

@@ -924,7 +924,6 @@ namespace GenOnlineService
 
 			var builder = WebApplication.CreateBuilder(args);
 			ConfigurationFiles.Initialize(builder.Environment.ContentRootPath);
-			RoomCatalog.Initialize(ConfigurationFiles.GetPath("rooms.json"));
 
 			// Add services to the container.
 
@@ -999,6 +998,8 @@ namespace GenOnlineService
 			}
 
 			builder.Services.AddHostedService<ExternalLeaderboardPublicationWorker>();
+			builder.Services.AddSingleton<ConfigurationFileCache>();
+			builder.Services.AddSingleton<FileCrcCache>();
 			builder.Services.AddSingleton<GeoIpDatabase>();
 			builder.Services.AddSingleton<LobbyManager>();
 
@@ -1261,6 +1262,7 @@ namespace GenOnlineService
 
 			var app = builder.Build();
 			ServiceLocator.Services = app.Services;
+			RoomCatalog.Initialize(app.Services.GetRequiredService<ConfigurationFileCache>());
 
 			if (useForwardedHeaders)
 			{

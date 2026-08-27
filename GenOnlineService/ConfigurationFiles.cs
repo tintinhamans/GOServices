@@ -2,7 +2,7 @@ namespace GenOnlineService
 {
 	internal static class ConfigurationFiles
 	{
-		private static readonly string[] DefaultFileNames =
+		internal static readonly string[] DefaultFileNames =
 		{
 			"motd.txt",
 			"patchdata.json",
