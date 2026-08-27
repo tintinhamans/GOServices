@@ -77,7 +77,8 @@ The main settings are in [`appsettings.json`](GenOnlineService/appsettings.json)
     <tr><td><code>Token</code></td><td>Cloudflare TURN API token.</td></tr>
     <tr><td><code>TokenTtl</code></td><td>TURN credential lifetime.</td></tr>
     <tr><td><code>AutomaticallyInvalidateTokens</code></td><td>Revokes old TURN credentials automatically.</td></tr>
-    <tr><td><code>Api</code></td><td><code>Keys</code></td><td>Values accepted in the <code>x-api-key</code> header. Letter case is ignored. An empty list disables API-key access.</td></tr>
+    <tr><td rowspan="2"><code>Api</code></td><td><code>Keys</code></td><td>Values accepted in the <code>x-api-key</code> header. Letter case is ignored. An empty list disables partner API-key access.</td></tr>
+    <tr><td><code>WebServerKey</code></td><td>Key used by the web server.</td></tr>
     <tr><td rowspan="2"><code>Monitor</code></td><td><code>Username</code></td><td>Monitoring login name.</td></tr>
     <tr><td><code>Password</code></td><td>Monitoring login password.</td></tr>
     <tr><td><code>RateLimiting</code></td><td><code>UseBuiltInRateLimiter</code></td><td>Enables the built-in limit for each user or IP address. Leave disabled if a reverse proxy handles rate limits.</td></tr>

@@ -1,7 +1,7 @@
 {
 	"retry_signalling": true,
 	"use_mapped_port": true,
-	"min_run_ahead_frames": 4,
+	"min_run_ahead_frames": 6,
 	"ra_update_frequency_frames": 10,
 	"relay_all_traffic": false,
 	"ra_slack_percent": 30,
@@ -22,6 +22,6 @@
 	"ibra_maxslack_greaterthan300ms": 1.0,
 	"ibra_minslack_greaterthan200ms": 0.4,
 	"ibra_maxslack_greaterthan200ms": 1.0,
-	"screenshot_width": 1440,
-	"screenshot_height": 700
+	"screenshot_width": 960,
+	"screenshot_height": 600
 }
