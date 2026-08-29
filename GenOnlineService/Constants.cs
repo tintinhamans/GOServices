@@ -1164,6 +1164,7 @@ namespace GenOnlineService
 
 	public class UserSession
 	{
+		public bool UsesWebSocketEnvelopeV1 { get; set; }
 		public Int64 m_UserID = -1;
 		
 		public string m_strContinent;
@@ -2981,6 +2982,35 @@ namespace GenOnlineService
 		public int msg_id { get; set; }
 	}
 
+	// Gateway-style envelope. Event names and payload schemas are independent of
+	// the legacy numeric message IDs, allowing the protocol to evolve safely.
+	public sealed class WebSocketEnvelope
+	{
+		public int op { get; set; } = 0;
+		public string t { get; set; } = String.Empty;
+		public object? d { get; set; }
+	}
+
+	public sealed class WebSocketEnvelopeInbound
+	{
+		public int op { get; set; }
+		public string t { get; set; } = String.Empty;
+		public JsonElement d { get; set; }
+	}
+
+	public static class WebSocketEnvelopeProtocol
+	{
+		public const string HeaderName = "x-go-websocket-protocol";
+		public const string Version1 = "envelope-v1";
+		public const string ReadyEvent = "READY";
+		public const string RoomChatSendEvent = "CHAT.ROOM.SEND";
+		public const string RoomChatMessageEvent = "CHAT.ROOM.MESSAGE";
+		public const string LobbyChatSendEvent = "CHAT.LOBBY.SEND";
+		public const string LobbyChatMessageEvent = "CHAT.LOBBY.MESSAGE";
+		public const string DirectChatSendEvent = "CHAT.DIRECT.SEND";
+		public const string DirectChatMessageEvent = "CHAT.DIRECT.MESSAGE";
+	}
+
 	public class WebSocketMessage_NameChange : WebSocketMessage
 	{
 		public string name { get; set; } = String.Empty;
@@ -3068,6 +3098,7 @@ namespace GenOnlineService
 	}
 	public class WebSocketMessage_NetworkRoomChatMessageOutbound : WebSocketMessage
 	{
+		public Int64 user_id { get; set; } = -1;
 		public string? message { get; set; }
 		public bool action { get; set; } = false;
 		public bool admin { get; set; } = false;

@@ -47,6 +47,28 @@ namespace GenOnlineService.Controllers
 			AllowOutOfOrderMetadataProperties = true
 		};
 
+		private static void QueueChatMessage(
+			UserSession session,
+			string eventType,
+			object envelopeData,
+			WebSocketMessage legacyMessage)
+		{
+			object packet = session.UsesWebSocketEnvelopeV1
+				? new WebSocketEnvelope { t = eventType, d = envelopeData }
+				: legacyMessage;
+			session.QueueWebsocketSend(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(packet)));
+		}
+
+		private static void QueueChatMessageToAllSessionsOfUser(
+			Int64 userID,
+			string eventType,
+			object envelopeData,
+			WebSocketMessage legacyMessage)
+		{
+			WebSocketManager.GetAllDataFromUser(userID).ForEach(session =>
+				QueueChatMessage(session, eventType, envelopeData, legacyMessage));
+		}
+
 		private static void QueueChatRateLimited(UserSession session, SharedUserData userData, string scopeType)
 		{
 			if (!userData.TryConsumeChatRateLimitNotice())
@@ -151,7 +173,7 @@ namespace GenOnlineService.Controllers
 			}
 		}
 
-		private struct WSMessageEnvelope
+		private struct LegacyWSMessageEnvelope
 		{
 			public int msg_id { get; set; }
 		}
@@ -160,7 +182,9 @@ namespace GenOnlineService.Controllers
 		// TODO: Remove the unscoped route after existing clients have migrated.
 		[Route("/ws")]
 		[Authorize(Roles = "GameClient,ChatClient,GameLauncher")]
-		public async Task Get([FromHeader(Name = "is-reconnect")] bool bIsReconnect)
+		public async Task Get(
+			[FromHeader(Name = "is-reconnect")] bool bIsReconnect,
+			[FromHeader(Name = WebSocketEnvelopeProtocol.HeaderName)] string? websocketProtocol)
 		{
 			if (!HttpContext.WebSockets.IsWebSocketRequest)
 			{
@@ -259,6 +283,20 @@ namespace GenOnlineService.Controllers
 
 			// attach
 			wsSess.AttachWebsocket(webSocket);
+			UserSession? userSession = WebSocketManager.GetSessionFromUser(user_id, sessType);
+			if (userSession == null)
+			{
+				return;
+			}
+			userSession.UsesWebSocketEnvelopeV1 = String.Equals(websocketProtocol, WebSocketEnvelopeProtocol.Version1, StringComparison.OrdinalIgnoreCase);
+			if (userSession.UsesWebSocketEnvelopeV1)
+			{
+				userSession.QueueWebsocketSend(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new WebSocketEnvelope
+				{
+					t = WebSocketEnvelopeProtocol.ReadyEvent,
+					d = new { version = 1, chat = true }
+				})));
+			}
 
 			var buffer = new byte[8196 * 4];
 			WebSocketReceiveResult? receiveResult = null;
@@ -453,19 +491,44 @@ namespace GenOnlineService.Controllers
 			}
 
 			ReadOnlySpan<byte> payload = buffer.AsSpan();
-
-			WSMessageEnvelope envelope;
+			ReadOnlySpan<byte> messagePayload = payload;
+			EWebSocketMessageID msgID;
 			try
 			{
-				envelope = JsonSerializer.Deserialize<WSMessageEnvelope>(payload, JsonOpts);
+				WebSocketEnvelopeInbound? envelope = sourceUserSession.UsesWebSocketEnvelopeV1
+					? JsonSerializer.Deserialize<WebSocketEnvelopeInbound>(payload, JsonOpts)
+					: null;
+				if (envelope != null && !String.IsNullOrEmpty(envelope.t))
+				{
+					if (envelope.op != 0 || envelope.d.ValueKind != JsonValueKind.Object)
+					{
+						return;
+					}
+
+					msgID = envelope.t switch
+					{
+						WebSocketEnvelopeProtocol.RoomChatSendEvent => EWebSocketMessageID.NETWORK_ROOM_CHAT_FROM_CLIENT,
+						WebSocketEnvelopeProtocol.LobbyChatSendEvent => EWebSocketMessageID.LOBBY_ROOM_CHAT_FROM_CLIENT,
+						WebSocketEnvelopeProtocol.DirectChatSendEvent => EWebSocketMessageID.SOCIAL_FRIEND_CHAT_MESSAGE_CLIENT_TO_SERVER,
+						_ => EWebSocketMessageID.UNKNOWN
+					};
+					if (msgID == EWebSocketMessageID.UNKNOWN)
+					{
+						return;
+					}
+					messagePayload = Encoding.UTF8.GetBytes(envelope.d.GetRawText());
+				}
+				else
+				{
+					LegacyWSMessageEnvelope legacyEnvelope = JsonSerializer.Deserialize<LegacyWSMessageEnvelope>(payload, JsonOpts);
+					msgID = (EWebSocketMessageID)legacyEnvelope.msg_id;
+				}
 			}
 			catch
 			{
 				// malformed
 				return;
 			}
-
-			EWebSocketMessageID msgID = (EWebSocketMessageID)envelope.msg_id;
 
 			// Only allocate a Dictionary when we actually need arbitrary fields
 			Dictionary<string, JsonElement>? data = null;
@@ -508,7 +571,7 @@ namespace GenOnlineService.Controllers
 				else if (msgID == EWebSocketMessageID.SOCIAL_FRIEND_CHAT_MESSAGE_CLIENT_TO_SERVER)
 				{
 					WebSocketMessage_Social_FriendChatMessage_Inbound? chatMessage =
-						JsonSerializer.Deserialize<WebSocketMessage_Social_FriendChatMessage_Inbound>(payload, JsonOpts);
+						JsonSerializer.Deserialize<WebSocketMessage_Social_FriendChatMessage_Inbound>(messagePayload, JsonOpts);
 
 					if (chatMessage != null)
 					{
@@ -543,11 +606,15 @@ namespace GenOnlineService.Controllers
 								outboundMsg.source_user_id = sourceWS.m_UserID;
 								outboundMsg.target_user_id = chatMessage.target_user_id;
 								outboundMsg.message = String.Format("{0}: {1}", sourceUserData.m_strDisplayName, chatMessage.message);
-								byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
-
 								// send to both on all websockets
-								WebsocketHelper.SendToAllSessionsOfUser(chatMessage.target_user_id, bytesJSON);
-								WebsocketHelper.SendToAllSessionsOfUser(sourceWS.m_UserID, bytesJSON);
+								object envelopeData = new
+								{
+									source_user_id = outboundMsg.source_user_id,
+									target_user_id = outboundMsg.target_user_id,
+									message = outboundMsg.message
+								};
+								QueueChatMessageToAllSessionsOfUser(chatMessage.target_user_id, WebSocketEnvelopeProtocol.DirectChatMessageEvent, envelopeData, outboundMsg);
+								QueueChatMessageToAllSessionsOfUser(sourceWS.m_UserID, WebSocketEnvelopeProtocol.DirectChatMessageEvent, envelopeData, outboundMsg);
 							}
 						}
 						else
@@ -575,7 +642,7 @@ namespace GenOnlineService.Controllers
 					}
 
 					WebSocketMessage_NetworkRoomChatMessageInbound? chatMessage =
-						JsonSerializer.Deserialize<WebSocketMessage_NetworkRoomChatMessageInbound>(payload, JsonOpts);
+						JsonSerializer.Deserialize<WebSocketMessage_NetworkRoomChatMessageInbound>(messagePayload, JsonOpts);
 
 					if (chatMessage != null)
 					{
@@ -588,6 +655,7 @@ namespace GenOnlineService.Controllers
 						// response
 						WebSocketMessage_NetworkRoomChatMessageOutbound outboundMsg = new WebSocketMessage_NetworkRoomChatMessageOutbound();
 						outboundMsg.msg_id = (int)EWebSocketMessageID.NETWORK_ROOM_CHAT_FROM_SERVER;
+						outboundMsg.user_id = sourceUserSession.m_UserID;
 
 						if (chatMessage.action)
 						{
@@ -613,8 +681,14 @@ namespace GenOnlineService.Controllers
 
 						outboundMsg.action = chatMessage.action;
 
-						// Serialize once before broadcasting
-						byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
+						object envelopeData = new
+						{
+							user_id = outboundMsg.user_id,
+							message = outboundMsg.message,
+							action = outboundMsg.action,
+							admin = outboundMsg.admin,
+							name_change = outboundMsg.name_change
+						};
 
 						// send it to everyone in the same room
 						foreach (var sessionDataByClient in WebSocketManager.GetUserDataCache())
@@ -634,7 +708,7 @@ namespace GenOnlineService.Controllers
 
 										if (!bBlocked)
 										{
-											targetSess.QueueWebsocketSend(bytesJSON);
+											QueueChatMessage(targetSess, WebSocketEnvelopeProtocol.RoomChatMessageEvent, envelopeData, outboundMsg);
 										}
 									}
 								}
@@ -854,7 +928,7 @@ namespace GenOnlineService.Controllers
 					}
 
 					WebSocketMessage_LobbyChatMessageInbound? chatMessage =
-						JsonSerializer.Deserialize<WebSocketMessage_LobbyChatMessageInbound>(payload, JsonOpts);
+						JsonSerializer.Deserialize<WebSocketMessage_LobbyChatMessageInbound>(messagePayload, JsonOpts);
 
 					if (chatMessage != null)
 					{
@@ -892,8 +966,14 @@ namespace GenOnlineService.Controllers
 							outboundMsg.announcement = chatMessage.announcement;
 							outboundMsg.show_announcement_to_host = chatMessage.show_announcement_to_host;
 
-							// Serialize once before broadcasting
-							byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
+							object envelopeData = new
+							{
+								user_id = outboundMsg.user_id,
+								message = outboundMsg.message,
+								action = outboundMsg.action,
+								announcement = outboundMsg.announcement,
+								show_announcement_to_host = outboundMsg.show_announcement_to_host
+							};
 
 							foreach (LobbyMember lobbyMember in playerLobby.Members)
 							{
@@ -913,7 +993,7 @@ namespace GenOnlineService.Controllers
 									{
 										if (sess != null)
 										{
-											sess.QueueWebsocketSend(bytesJSON);
+										QueueChatMessage(sess, WebSocketEnvelopeProtocol.LobbyChatMessageEvent, envelopeData, outboundMsg);
 										}
 									}
 								}

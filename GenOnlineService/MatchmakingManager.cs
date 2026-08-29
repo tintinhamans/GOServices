@@ -311,6 +311,8 @@ static class MatchmakingManager
 		private bool m_bWaitingOnLobbyJoins = false;
 		private bool m_bHasStartedCountdown = false;
 		private bool m_bWaitingOnMeshConnectivityChecks = false;
+		private bool m_bWaitingOnMeshCheckWarmup = false;
+		private Int64 m_timeMeshCheckWarmupStart = -1;
 		private bool m_bAutoStartInvalidated = false;
 		private bool m_bPendingDeletion = false;
 		private bool m_bMergedAway = false;
