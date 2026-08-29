@@ -31,6 +31,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using System.Threading.Channels;
 
 namespace GenOnlineService
 {
@@ -373,8 +374,16 @@ namespace GenOnlineService
 	static class WebSocketManager
 	{
 		public static int g_PeakConnectionCount = 0;
+
+		// Serializes CreateSession per user to avoid interleaved connect/reconnect races.
+		private static readonly ConcurrentDictionary<(EUserSessionType, Int64), SemaphoreSlim> m_connectLocks = new();
+
 		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
+			SemaphoreSlim connectLock = m_connectLocks.GetOrAdd((sessionType, ownerID), _ => new SemaphoreSlim(1, 1));
+			await connectLock.WaitAsync();
+			try
+			{
 			string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
 
 			// if we have cache data, that means its a reconnect, noraml connections go through login flows which reset cache data
@@ -488,7 +497,7 @@ namespace GenOnlineService
 				await supersededSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
 			}
 
-			UserWebSocketInstance newSess = new UserWebSocketInstance(sessionType, ownerID);
+			UserWebSocketInstance newSess = new UserWebSocketInstance(sessionType, ownerID, userCacheData);
 			m_dictWebsockets[sessionType][ownerID] = newSess;
 
 			// update last login and last ip
@@ -526,24 +535,22 @@ namespace GenOnlineService
 					outboundMsg.num_online = numOnline;
 					outboundMsg.num_pending = numPending;
 					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
-					await newSess.SendAsync(bytesJSON, WebSocketMessageType.Text);
+					userCacheData.QueueWebsocketSend(bytesJSON);
 				}
 			}
 
 			return newSess;
+			}
+			finally
+			{
+				connectLock.Release();
+			}
 		}
 
-		public static async Task Tick()
+		public static void Tick()
 		{
+			// per-session sends are now event-driven; only lobby list flushing needs a tick
 			FlushLobbyListUpdates();
-
-			// Give the entire tick a 20 ms deadline. All users drain concurrently via
-			// Task.WhenAll, so a slow/stuck client cannot delay others. If the deadline
-			// fires, the CancellationToken propagates into each in-flight SendAsync and
-			// into the dequeue loop guard, so the stuck user is skipped and their unsent
-			// messages stay in the queue for the next tick.
-			using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
-			await Task.WhenAll(m_dictUserSessions.Values.SelectMany(inner => inner.Values).Select(sess => sess.TickWebsocket(cts.Token)));
 		}
 
 		public static int GetNumberOfUsersOnline()
@@ -559,33 +566,6 @@ namespace GenOnlineService
 
 		public static async Task CheckForTimeouts()
 		{
-			List<UserWebSocketInstance> lstSessionsToDestroy = new();
-			foreach (var sessionDataByClient in m_dictWebsockets)
-			{
-				foreach (var sessionData in sessionDataByClient.Value)
-				{
-#if DEBUG
-					const int timeoutVal = 60000 * 10;
-#else
-			const int timeoutVal = 20000;
-#endif
-					if (sessionData.Value.GetTimeSinceLastPing() >= timeoutVal)
-					{
-						lstSessionsToDestroy.Add(sessionData.Value);
-					}
-					else
-					{
-						await sessionData.Value.SendPong();
-					}
-				}
-			}
-
-			foreach (UserWebSocketInstance wsSess in lstSessionsToDestroy)
-			{
-				Console.WriteLine("Timing out WS session for {0}", wsSess.m_UserID);
-				await DeleteSession(wsSess.m_UserID, wsSess.m_SessionType, wsSess, false);
-			}
-
 			// do we need to clear out cache entries?
 			List<Tuple<Int64, EUserSessionType>> lstCacheEntriesToDestroy = new();
 			foreach (var sessionDataPerClientType in m_dictUserSessions)
@@ -1267,6 +1247,17 @@ namespace GenOnlineService
 			return m_timeAbandoned != -1 && websocketForUser == null;
 		}
 
+		// Lives on UserSession so sends survive a reconnect; bounded to force-close a stalled connection
+		// instead of leaking memory.
+		private readonly Channel<byte[]> m_sendChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(500)
+		{
+			FullMode = BoundedChannelFullMode.Wait,
+			SingleReader = true,
+			SingleWriter = false
+		});
+
+		internal ChannelReader<byte[]> SendChannelReader => m_sendChannel.Reader;
+
 		// TODO_EFCORE: check all uses of QueueWebsocketSend, some might need to be SendToAllInstances
 		public void QueueWebsocketSend(byte[] bytesJSON)
 		{
@@ -1275,9 +1266,11 @@ namespace GenOnlineService
 				return;
 			}
 
-			// Always enqueue; the TickWebsocket drain loop is the sole sender,
-			// ensuring WebSocket.SendAsync is never called concurrently.
-			m_lstPendingWebsocketSends.Enqueue(bytesJSON);
+			if (!m_sendChannel.Writer.TryWrite(bytesJSON))
+			{
+				// outbound queue is full; force a reconnect instead of dropping messages
+				_ = CloseWebsocket(WebSocketCloseStatus.PolicyViolation, "Outbound message queue exceeded capacity");
+			}
 		}
 
 		public async Task<UserWebSocketInstance> CloseWebsocket(WebSocketCloseStatus reason, string strReason)
@@ -1291,29 +1284,9 @@ namespace GenOnlineService
 			return websocketForUser;
 		}
 
-		public async Task TickWebsocket(CancellationToken tickToken = default)
-		{
-			// Do we have a connection to send on?
-			UserWebSocketInstance websocketForUser = WebSocketManager.GetWebSocketForSession(this);
-			if (websocketForUser != null)
-			{
-				const int maxMessagesSendPerFrame = 50;
-				int messagesSent = 0;
-				// start dequeing and sending
-				while (!tickToken.IsCancellationRequested && messagesSent < maxMessagesSendPerFrame && m_lstPendingWebsocketSends.TryDequeue(out byte[] packetData))
-				{
-					await websocketForUser.SendAsync(packetData, WebSocketMessageType.Text, tickToken);
-					++messagesSent;
-				}
-			}
-		}
-		
-		// TODO_CACHE: Size limit this?
-		ConcurrentQueue<byte[]> m_lstPendingWebsocketSends = new ConcurrentQueue<byte[]>();
-
 		public bool NeedsCleanup()
 		{
-			const Int64 timeBeforeConsideredAbandoned = 30000; // 5 minutes
+			const Int64 timeBeforeConsideredAbandoned = 30000; // 30s reconnect buffer; keep-alive detection is fast
 			return Environment.TickCount64 - m_timeAbandoned >= timeBeforeConsideredAbandoned;
 		}
 
@@ -1464,49 +1437,67 @@ namespace GenOnlineService
 		public EUserSessionType m_SessionType = EUserSessionType.None;
 		public Int64 m_UserID = -1;
 
-		public Int64 m_lastPingTime = Environment.TickCount64; // last time we pinged this user, used to detect disconnects
-		
-		
 
 		// TODO: Start using nullable for int values etc instead of doing 0 or -1
-        public async Task SendPong()
-		{
-			OnPing();
-
-			// send pong back
-			WebSocketMessage_PONG outboundMsg = new WebSocketMessage_PONG();
-			outboundMsg.msg_id = (int)EWebSocketMessageID.PONG;
-			byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outboundMsg));
-			await SendAsync(bytesJSON, WebSocketMessageType.Text);
-		}
-		
 
 		private WebSocket? m_SockInternal = null;
+		private readonly UserSession m_OwnerSession;
+		private CancellationTokenSource? m_sendPumpCts;
+		private Task? m_sendPumpTask;
 
-		public UserWebSocketInstance(EUserSessionType sessionType, Int64 ownerID) : base()
+		public UserWebSocketInstance(EUserSessionType sessionType, Int64 ownerID, UserSession ownerSession) : base()
 		{
 			m_SessionType = sessionType;
 			m_UserID = ownerID;
+			m_OwnerSession = ownerSession;
 		}
 
 		public void AttachWebsocket(WebSocket sock)
 		{
 			m_SockInternal = sock;
+			StartSendPump();
 		}
 
-		public void OnPing()
+		// Drains this connection's send channel while attached; event-driven, no polling.
+		private void StartSendPump()
 		{
-			m_lastPingTime = Environment.TickCount64;
+			CancellationTokenSource cts = new CancellationTokenSource();
+			m_sendPumpCts = cts;
+			m_sendPumpTask = Task.Run(async () =>
+			{
+				try
+				{
+					await foreach (byte[] packetData in m_OwnerSession.SendChannelReader.ReadAllAsync(cts.Token))
+					{
+						await SendAsync(packetData, WebSocketMessageType.Text);
+					}
+				}
+				catch (OperationCanceledException)
+				{
+					// pump stopped; buffered items wait for the next connection's pump
+				}
+			});
 		}
 
-		public Int64 GetLastPingTime()
+		public async Task StopSendPumpAsync()
 		{
-			return m_lastPingTime;
-		}
+			CancellationTokenSource? cts = m_sendPumpCts;
+			Task? pumpTask = m_sendPumpTask;
+			m_sendPumpCts = null;
+			m_sendPumpTask = null;
 
-		public Int64 GetTimeSinceLastPing()
-		{
-			return Environment.TickCount64 - m_lastPingTime;
+			cts?.Cancel();
+
+			if (pumpTask != null)
+			{
+				try
+				{
+					await pumpTask;
+				}
+				catch (OperationCanceledException)
+				{
+				}
+			}
 		}
 
 		public async Task SendAsync(byte[] buffer, WebSocketMessageType messageType, CancellationToken externalToken = default)
@@ -1586,6 +1577,8 @@ namespace GenOnlineService
 
 		public async Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription)
 		{
+			await StopSendPumpAsync();
+
 			if (m_SockInternal != null)
 			{
 				try
@@ -3063,9 +3056,6 @@ namespace GenOnlineService
 		public string? message { get; set; }
 	}
 
-	public class WebSocketMessage_PONG : WebSocketMessage
-	{
-	}
 	public class WebSocketMessage_NetworkRoomChatMessageOutbound : WebSocketMessage
 	{
 		public string? message { get; set; }

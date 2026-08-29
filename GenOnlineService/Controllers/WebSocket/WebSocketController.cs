@@ -285,8 +285,7 @@ namespace GenOnlineService.Controllers
 				}
 				catch (OperationCanceledException)
 				{
-					// No message received in 30s � send a keep-alive pong and continue waiting
-					await wsSess.SendPong();
+					// No message received in 30s; the framework's own keep-alive handles liveness now
 					continue;
 				}
 				catch (Exception ex)
@@ -489,11 +488,7 @@ namespace GenOnlineService.Controllers
 
 			try
 			{
-				if (msgID == EWebSocketMessageID.PING)
-				{
-					await sourceWS.SendPong();
-				}
-				else if (msgID == EWebSocketMessageID.SOCIAL_SUBSCRIBE_REALTIME_UPDATES)
+				if (msgID == EWebSocketMessageID.SOCIAL_SUBSCRIBE_REALTIME_UPDATES)
 				{
 					sourceUserSession.SetSubscribedToRealtimeSocialUpdates(true);
 				}
