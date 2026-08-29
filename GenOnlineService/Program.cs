@@ -1278,7 +1278,8 @@ namespace GenOnlineService
 
 			var webSocketOptions = new WebSocketOptions
 			{
-				KeepAliveInterval = TimeSpan.FromSeconds(30)
+				KeepAliveInterval = TimeSpan.FromSeconds(15),
+				KeepAliveTimeout = TimeSpan.FromSeconds(10) // real dead-peer detection (net9+)
 			};
 
 			app.UseWebSockets(webSocketOptions);
