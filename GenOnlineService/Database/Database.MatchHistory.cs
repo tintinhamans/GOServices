@@ -23,6 +23,7 @@ using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Query;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -1039,6 +1040,13 @@ namespace Database
 			if (lobby.MatchID == 0)
 				return;
 
+			long startedAt = Stopwatch.GetTimestamp();
+			string outcome = "error";
+			using Activity? activity = AppMetrics.StartActivity("match.finalize");
+			activity?.SetTag("match.id", lobby.MatchID);
+			activity?.SetTag("lobby.type", lobby.LobbyType.ToString().ToLowerInvariant());
+			try
+			{
 			await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
 			await CommitLobbyToMatchHistory(db, lobby, cancellationToken);
@@ -1046,6 +1054,21 @@ namespace Database
 			await ScheduleExternalPublication(db, lobby.MatchID, cancellationToken);
 
 			await transaction.CommitAsync(cancellationToken);
+				outcome = "success";
+			}
+			catch (Exception ex)
+			{
+				AppMetrics.RecordException(activity, ex);
+				throw;
+			}
+			finally
+			{
+				TimeSpan duration = Stopwatch.GetElapsedTime(startedAt);
+				string lobbyType = lobby.LobbyType.ToString().ToLowerInvariant();
+				AppMetrics.RecordMatchFinalization(outcome, lobbyType, duration);
+				AppMetrics.RecordMatchOperation("finalize", outcome, lobbyType);
+				activity?.SetTag("match.finalization.outcome", outcome);
+			}
 		}
 
 		private static async Task CommitLobbyToMatchHistory(
@@ -1115,6 +1138,23 @@ namespace Database
 			return pending
 				.Select(item => new ExternalPublicationWorkItem(item.MatchId, item.Attempts + 1))
 				.ToList();
+		}
+
+		public static async Task<(int Depth, DateTime? OldestEnqueuedAt)> GetExternalPublicationQueueSnapshot(
+			AppDbContext db,
+			CancellationToken cancellationToken)
+		{
+			IQueryable<ExternalPublicationEntry> unpublished = db.ExternalPublications
+				.AsNoTracking()
+				.Where(publication => publication.PublishedAt == null);
+			int depth = await unpublished.CountAsync(cancellationToken);
+			DateTime? oldestEnqueuedAt = await (
+				from publication in unpublished
+				join match in db.MatchHistory.AsNoTracking() on publication.MatchId equals match.MatchId
+				where match.Finished
+				select (DateTime?)match.TimeFinished)
+				.MinAsync(cancellationToken);
+			return (depth, oldestEnqueuedAt);
 		}
 
 		public static async Task MarkExternalPublicationSucceeded(

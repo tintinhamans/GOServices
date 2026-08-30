@@ -121,6 +121,8 @@ namespace GenOnlineService
 
         public static async Task<string> PostMatchResultAsync(MatchHistory_Entry matchEntry, CancellationToken cancellationToken = default)
         {
+            string outcome = "error";
+            using IDisposable measurement = AppMetrics.MeasureDependency("external_leaderboard", "publish_match", () => outcome);
             ArgumentNullException.ThrowIfNull(matchEntry);
 
             long matchID = matchEntry.match_id;
@@ -151,6 +153,7 @@ namespace GenOnlineService
                     responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
                     if (!response.IsSuccessStatusCode)
                     {
+                        outcome = "http_error";
                         string errorBody = responseBody.Length <= 256 ? responseBody : responseBody[..256];
                         throw new HttpRequestException(
                             $"External Match Ingest returned {(int)response.StatusCode} ({response.StatusCode}): {errorBody}",
@@ -160,11 +163,14 @@ namespace GenOnlineService
                 }
             }
 
+            outcome = "success";
             return responseBody;
         }
 
         public static async Task<EloData?> GetEloFromApi(long playerId)
         {
+            string outcome = "error";
+            using IDisposable measurement = AppMetrics.MeasureDependency("external_leaderboard", "get_elo", () => outcome);
             try
             {
                 GetExternalLeaderboardsConfig(out string getUrl, out string getToken);
@@ -187,6 +193,7 @@ namespace GenOnlineService
 
                             if (!response.IsSuccessStatusCode)
                             {
+                                outcome = "http_error";
                                 s_log.LogError("External ELO API call failed for player {PlayerId} with status {StatusCode}", playerId, response.StatusCode);
                                 return null;
                             }
@@ -195,10 +202,12 @@ namespace GenOnlineService
                             var result = JsonSerializer.Deserialize<EloRefreshResponse>(responseBody);
                             if (result?.data == null || !result.data.TryGetValue(playerId, out var entry))
                             {
+                                outcome = "invalid_response";
                                 s_log.LogError("External ELO API response for player {PlayerId} did not contain that player ID or could not be deserialized", playerId);
                                 return null;
                             }
 
+                            outcome = "success";
                             return new EloData(entry.overall.rating, entry.season.rating, entry.overall.matches);
                         }
                     }
