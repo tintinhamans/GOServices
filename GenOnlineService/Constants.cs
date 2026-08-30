@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Net;
@@ -373,6 +374,8 @@ namespace GenOnlineService
 	// TODO
 	static class WebSocketManager
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(WebSocketManager));
+
 		public static int g_PeakConnectionCount = 0;
 		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
@@ -383,7 +386,7 @@ namespace GenOnlineService
 			if (bIsReconnect)
 			{
 				// this is a reconnect, re-use cache
-				Console.WriteLine("--> WEBSOCKET RECONNECT");
+				s_log.LogDebug("WebSocket reconnect for user {UserId} ({SessionType})", ownerID, sessionType);
 
 				// if its a reconnect, and we dont have cache OR shared data, its probably a server restart, so return null
 				if (userCacheData == null)
@@ -425,7 +428,7 @@ namespace GenOnlineService
 			}
 			else
 			{
-				Console.WriteLine("--> WEBSOCKET CONNECT");
+				s_log.LogDebug("WebSocket connect for user {UserId} ({SessionType})", ownerID, sessionType);
 
 				// how many other sessions do they have online?
 				bool bIsFirstSessionForUser = WebSocketManager.GetAllDataFromUser(ownerID).Count == 0;
@@ -433,7 +436,7 @@ namespace GenOnlineService
 				// kill any existing sessions for this user of same session type
 				if (m_dictWebsockets[sessionType].TryGetValue(ownerID, out UserWebSocketInstance? existingSession))
 				{
-					Console.WriteLine("Killing existing session for {0} ({1})", ownerID, strDisplayName);
+					s_log.LogDebug("Killing existing session for {UserId} ({DisplayName})", ownerID, strDisplayName);
 					await DeleteSession(ownerID, sessionType, existingSession, !bIsReconnect);
 				}
 
@@ -483,7 +486,7 @@ namespace GenOnlineService
 			// close the previous socket first: it may still be open, and its send loop must stop reading the session's queue
 			if (m_dictWebsockets[sessionType].TryRemove(ownerID, out UserWebSocketInstance? supersededSess) && supersededSess != null)
 			{
-				Console.WriteLine("Closing superseded websocket for {0} ({1})", ownerID, strDisplayName);
+				s_log.LogDebug("Closing superseded websocket for {UserId} ({DisplayName})", ownerID, strDisplayName);
 				await supersededSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
 			}
 
@@ -678,17 +681,18 @@ namespace GenOnlineService
 							}
 							else
 							{
-								Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — lobby={sourceData.currentLobbyID} found={ingameLobby != null} state={ingameLobby?.State}");
+								s_log.LogWarning("DeleteSession(false): skipped RecordPlayerIngameAbandon for user {UserId}, lobby={LobbyId} found={LobbyFound} state={LobbyState}",
+								user_id, sourceData.currentLobbyID, ingameLobby != null, ingameLobby?.State);
 							}
 						}
 						else
 						{
-							Console.WriteLine($"[WARN] DeleteSession(false): skipped RecordPlayerIngameAbandon for user {user_id} — currentLobbyID==-1 (session has no lobby)");
+							s_log.LogWarning("DeleteSession(false): skipped RecordPlayerIngameAbandon for user {UserId}, currentLobbyID==-1 (session has no lobby)", user_id);
 						}
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[WARN] Failed to record in-game abandon for user {user_id}: {ex.Message}");
+						s_log.LogWarning(ex, "Failed to record in-game abandon for user {UserId}", user_id);
 					}
 				}
 			}
@@ -855,8 +859,7 @@ namespace GenOnlineService
 				}
 				catch (Exception ex)
 				{
-					Console.WriteLine($"[ERROR] DisconnectUser failed for user {userID}, session {userSession.GetSessionType()}: {ex.Message}");
-					SentrySdk.CaptureException(ex);
+					s_log.LogError(ex, "DisconnectUser failed for user {UserId}, session {SessionType}", userID, userSession.GetSessionType());
 				}
 			}
 		}
@@ -885,7 +888,7 @@ namespace GenOnlineService
 				}
 				else
 				{
-					Console.WriteLine("Error: Could not find shared data for user {0} when deleting session", userID);
+					s_log.LogWarning("Could not find shared data for user {UserId} when deleting session", userID);
 				}
 			}
 			catch
@@ -1175,6 +1178,8 @@ namespace GenOnlineService
 
 	public class UserSession
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(UserSession));
+
 		public Int64 m_UserID = -1;
 		
 		public string m_strContinent;
@@ -1291,7 +1296,7 @@ namespace GenOnlineService
 				// too far behind to catch up: drop the connection so the client reconnects
 				if (WebSocketManager.GetWebSocketForSession(this)?.AbortIfOpen() == true)
 				{
-					Console.WriteLine("[WebSocket] Outbound queue full for {0}, connection aborted", m_UserID);
+					s_log.LogWarning("Outbound websocket queue full for user {UserId}; connection aborted", m_UserID);
 				}
 			}
 		}
@@ -1441,7 +1446,8 @@ namespace GenOnlineService
 		{
 			if (!RoomCatalog.TryResolveTargetRoomID(newRoomID, out Int16 targetRoomID))
 			{
-				Console.WriteLine($"Rejected invalid network room selection {newRoomID} from user {m_UserID}; keeping selected room {selectedNetworkRoomID}.");
+				s_log.LogWarning("Rejected invalid network room selection {RequestedRoomId} from user {UserId}, keeping selected room {SelectedRoomId}",
+					newRoomID, m_UserID, selectedNetworkRoomID);
 				return false;
 			}
 
@@ -1479,6 +1485,8 @@ namespace GenOnlineService
 
 	public class UserWebSocketInstance
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(UserWebSocketInstance));
+
 		// cached user data, useful
 		public EUserSessionType m_SessionType = EUserSessionType.None;
 		public Int64 m_UserID = -1;
@@ -1567,7 +1575,7 @@ namespace GenOnlineService
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"[WebSocket] Send loop failed for {m_UserID}: {ex}");
+				s_log.LogError(ex, "Websocket send loop failed for user {UserId}", m_UserID);
 			}
 		}
 
@@ -1587,7 +1595,7 @@ namespace GenOnlineService
 			}
 			catch (OperationCanceledException)
 			{
-				Console.WriteLine("[WebSocket] Send to {0} stalled for {1}s, connection aborted", m_UserID, c_SendStallTimeout.TotalSeconds);
+				s_log.LogWarning("Websocket send to user {UserId} stalled for {StallSeconds}s; connection aborted", m_UserID, c_SendStallTimeout.TotalSeconds);
 				return false;
 			}
 			catch
@@ -1630,6 +1638,8 @@ namespace GenOnlineService
 	};
 	public static class SessionHelpers
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(SessionHelpers));
+
 		public static bool SessionTypeHasAccessTo(EUserSessionType sessType, ESessionAccessType accessType)
 		{
 			if (sessType == EUserSessionType.GameClient) // client can do anything
@@ -1650,9 +1660,7 @@ namespace GenOnlineService
 		public static async Task FullyDestroyPlayerSession(Int64 user_id, UserSession? userData, bool bMigrateLobbyIfPresent)
 		{
 			// NOTE: Dont assume userData is valid, use user_id for user id
-			Console.ForegroundColor = ConsoleColor.Cyan;
-			Console.WriteLine("FullyDestroyPlayerSession for user {0}", user_id);
-			Console.ForegroundColor = ConsoleColor.Gray;
+			s_log.LogInformation("FullyDestroyPlayerSession for user {UserId}", user_id);
 
 			// invalidate any TURN credentials
 			TURNCredentialManager.DeleteCredentialsForUser(user_id);
@@ -1665,7 +1673,7 @@ namespace GenOnlineService
 			//await m_Inst.Query("DELETE FROM sessions WHERE user_id={0} AND session_type={1};", user_id, (int)ESessionType.Game);
 
 			// leave any lobby
-			Console.WriteLine("[Source 2] User {0} Leave Any Lobby", user_id);
+			s_log.LogInformation("User {UserId} leaving any lobby (session teardown)", user_id);
 
 			var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
 			await lobbyManager.LeaveAnyLobby(user_id);
@@ -1687,18 +1695,14 @@ namespace GenOnlineService
 			// TODO_EFCORE: Move away from db for this and just have website login call endpoint on service
 			//UInt16 clientID = clientIDStr == "gen_online_60hz" ? (UInt16)1 : (UInt16)0;
 
-			Console.ForegroundColor = ConsoleColor.Cyan;
-			Console.WriteLine("StartSession deleing other sessions for user {0}", userID);
-			Console.ForegroundColor = ConsoleColor.Gray;
+			s_log.LogInformation("StartSession deleting other sessions for user {UserId}", userID);
 
 			// kill any WS they had too, StartSession comes before WS connects
 			// disconnect any other sessions with this ID
 			UserSession? sess = GenOnlineService.WebSocketManager.GetSessionFromUser(userID, sessionType);
 			if (sess != null)
 			{
-				Console.ForegroundColor = ConsoleColor.Cyan;
-				Console.WriteLine("Found duplicate session for user {0}", userID);
-				Console.ForegroundColor = ConsoleColor.Gray;
+				s_log.LogInformation("Found duplicate session for user {UserId}", userID);
 
 				UserWebSocketInstance? oldWS = GenOnlineService.WebSocketManager.GetWebSocketForSession(sess);
 				await GenOnlineService.WebSocketManager.DeleteSession(userID, sessionType, oldWS, false);
@@ -2397,6 +2401,8 @@ namespace GenOnlineService
 
 	public static class S3CredentialManager
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(S3CredentialManager));
+
 		private static AmazonS3Client m_s3client = null;
 		private static bool s_uploadsEnabled = false;
 
@@ -2412,7 +2418,7 @@ namespace GenOnlineService
 			// When uploads are disabled, the S3 settings are intentionally optional.
 			if (!s_uploadsEnabled)
 			{
-				Console.WriteLine("MatchData: upload_match_data is false, replay and screenshot uploads are disabled.");
+				s_log.LogInformation("MatchData: upload_match_data is false, replay and screenshot uploads are disabled");
 				return;
 			}
 
@@ -2567,6 +2573,8 @@ namespace GenOnlineService
 
 	public static class TURNCredentialManager
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(TURNCredentialManager));
+
 		private static ConcurrentDictionary<Int64, string> g_DictTURNUsernames = new();
 
 		private static void GetTURNConfig(out int TTL, out string token, out string key, out bool bShouldInvalidateTokensAutomatically)
@@ -2683,13 +2691,13 @@ namespace GenOnlineService
 				//client.DefaultRequestHeaders.Add("Content-Type", "application/json");
 				try
 				{
-					Console.WriteLine("Start req turn credentials at {0}", Environment.TickCount);
+					var sw = Stopwatch.StartNew();
 					string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/generate-ice-servers", TurnKey);
 					HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
 
 					if (response.IsSuccessStatusCode)
 					{
-						Console.WriteLine("Finish req turn credentials at {0}", Environment.TickCount);
+						s_log.LogDebug("TURN credential request for user {UserId} took {ElapsedMs}ms", userID, sw.ElapsedMilliseconds);
 						string responseBody = await response.Content.ReadAsStringAsync();
 						TURNResponse? resp = JsonSerializer.Deserialize<TURNResponse>(responseBody);
 
