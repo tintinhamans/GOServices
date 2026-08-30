@@ -984,6 +984,15 @@ namespace GenOnlineService
 
 					options.Release = "generalsonline-services@082826";
 				});
+
+				// Bridge ILogger into Sentry: Warning+ ride along as breadcrumbs, Error+ are captured as events.
+				// InitializeSdk is false because we already initialized the SDK above with our own config.
+				builder.Logging.AddSentry(options =>
+				{
+					options.InitializeSdk = false;
+					options.MinimumBreadcrumbLevel = LogLevel.Warning;
+					options.MinimumEventLevel = LogLevel.Error;
+				});
 			}
 
 			S3CredentialManager.Initialize();
