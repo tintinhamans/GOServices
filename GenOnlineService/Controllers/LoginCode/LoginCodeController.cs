@@ -52,7 +52,9 @@ public static class PendingLoginManager
 		RemoveIfExpired(strLoginCode);
 
 		// we try add, if its already in there, dont nuke it, could be abused
-		return g_dictPendingLogins.TryAdd(strLoginCode, new PendingLoginEntry());
+		bool added = g_dictPendingLogins.TryAdd(strLoginCode, new PendingLoginEntry());
+		AppMetrics.RecordPendingLoginSnapshot(g_dictPendingLogins.Count);
+		return added;
 	}
 
 	public static PendingLoginEntry GetPendingLogin(string strLoginCode)
@@ -73,7 +75,9 @@ public static class PendingLoginManager
 
 	public static bool ConsumePendingLogin(string strLoginCode)
 	{
-		return g_dictPendingLogins.TryRemove(strLoginCode, out PendingLoginEntry removedInst);
+		bool removed = g_dictPendingLogins.TryRemove(strLoginCode, out PendingLoginEntry removedInst);
+		AppMetrics.RecordPendingLoginSnapshot(g_dictPendingLogins.Count);
+		return removed;
 	}
 
 	public static bool UpdatePendingLogin(string strLoginCode, EPendingLoginState newState, Int64 userIDIfComplete = -1)
@@ -92,6 +96,7 @@ public static class PendingLoginManager
 			{
 				pendingLoginInst.state = newState;
 				pendingLoginInst.user_id = userIDIfComplete;
+				AppMetrics.RecordPendingLoginSnapshot(g_dictPendingLogins.Count);
 				return true;
 			}
 
@@ -117,6 +122,7 @@ public static class PendingLoginManager
 			}
 		}
 
+		AppMetrics.RecordPendingLoginSnapshot(g_dictPendingLogins.Count);
 		return numRemoved;
 	}
 
@@ -127,6 +133,7 @@ public static class PendingLoginManager
 			if (pendingLoginInst.IsExpired(DateTime.UtcNow))
 			{
 				g_dictPendingLogins.TryRemove(new KeyValuePair<string, PendingLoginEntry>(strLoginCode, pendingLoginInst));
+				AppMetrics.RecordPendingLoginSnapshot(g_dictPendingLogins.Count);
 			}
 		}
 	}
@@ -155,6 +162,10 @@ namespace GenOnlineService.Controllers
 		[HttpPost]
 		public async Task Post([FromHeader(Name = "X-Api-Key")] string apiKey)
 		{
+			using IDisposable authenticationMetric = AppMetrics.MeasureAuthentication(
+				"login_code_callback",
+				"partner",
+				() => Response.StatusCode < 400 ? "success" : $"http_{Response.StatusCode}");
 			if (string.IsNullOrEmpty(apiKey))
 			{
 				Response.StatusCode = (int)HttpStatusCode.Unauthorized;
@@ -233,11 +244,13 @@ namespace GenOnlineService.Controllers
 		public async Task<APIResult> Get()
 		{
 			GET_LoginCode_Result result = new GET_LoginCode_Result();
+			using IDisposable authenticationMetric = AppMetrics.MeasureAuthentication(
+				"login_code_issue",
+				"client",
+				() => result.success ? "success" : "collision");
 
-			result.success = true;
 			result.login_code = GenerateLoginCode();
-
-			PendingLoginManager.AddPendingLogin(result.login_code);
+			result.success = PendingLoginManager.AddPendingLogin(result.login_code);
 
 			return result;
 		}

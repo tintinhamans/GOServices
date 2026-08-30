@@ -77,6 +77,10 @@ namespace GenOnlineService.Controllers
 		public async Task<APIResult> Post_InternalHandler(string jsonData, string ipAddr, string webSocketUrl, bool bIsMonitor = false)
 		{
 			POST_CheckLogin_Result result = new POST_CheckLogin_Result();
+			using IDisposable authenticationMetric = AppMetrics.MeasureAuthentication(
+				"check_login",
+				bIsMonitor ? "monitor" : "client",
+				() => result.result.ToString().ToLowerInvariant());
 
 			// Must have an IP...
 			if (bIsMonitor)

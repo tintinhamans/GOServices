@@ -376,6 +376,13 @@ namespace GenOnlineService
 		private static readonly ILogger s_log = AppLog.For(typeof(WebSocketManager));
 
 		public static int g_PeakConnectionCount = 0;
+
+		private static void RecordConnectionSnapshot()
+		{
+			AppMetrics.RecordWebSocketConnectionSnapshot(
+				m_dictWebsockets.Select(entry => new KeyValuePair<EUserSessionType, int>(entry.Key, entry.Value.Count)));
+		}
+
 		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
 			string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
@@ -390,6 +397,7 @@ namespace GenOnlineService
 				// if its a reconnect, and we dont have cache OR shared data, its probably a server restart, so return null
 				if (userCacheData == null)
 				{
+					AppMetrics.RecordWebSocketConnection("reconnect", "cache_missing", sessionType);
 					return null;
 				}
 				else
@@ -493,6 +501,8 @@ namespace GenOnlineService
 
 			UserWebSocketInstance newSess = new UserWebSocketInstance(sessionType, ownerID);
 			m_dictWebsockets[sessionType][ownerID] = newSess;
+			AppMetrics.RecordWebSocketConnection(bIsReconnect ? "reconnect" : "connect", "success", sessionType);
+			RecordConnectionSnapshot();
 
 			// update last login and last ip
 			await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
@@ -586,6 +596,7 @@ namespace GenOnlineService
 			foreach (UserWebSocketInstance wsSess in lstSessionsToDestroy)
 			{
 				s_log.LogInformation("Timing out WS session for user {UserId}", wsSess.m_UserID);
+				AppMetrics.RecordWebSocketConnection("timeout", "expired", wsSess.m_SessionType);
 				await DeleteSession(wsSess.m_UserID, wsSess.m_SessionType, wsSess, false);
 			}
 
@@ -737,6 +748,9 @@ namespace GenOnlineService
 			{
 
 			}
+
+			AppMetrics.RecordWebSocketConnection("disconnect", "success", sessionType);
+			RecordConnectionSnapshot();
 		}
 
 		/*
@@ -898,7 +912,12 @@ namespace GenOnlineService
 
 			}
 
-			return m_dictUserSessions[sessionType].Remove(userID, out var itemRemoved);
+			bool removed = m_dictUserSessions[sessionType].Remove(userID, out var itemRemoved);
+			if (removed && itemRemoved != null)
+			{
+				itemRemoved.DiscardPendingWebsocketSends();
+			}
+			return removed;
 		}
 
 
@@ -1182,6 +1201,7 @@ namespace GenOnlineService
 
 		// Matchmaking data
 		public UInt16 MatchmakingPlaylistID = 0;
+		public long MatchmakingStartedTimestamp = 0;
 		public ConcurrentList<int> MatchmakingMapIndicies = new();
 		internal bool IsRegisteredForMatchmaking { get; set; } = false;
 		internal SemaphoreSlim MatchmakingStateLock { get; } = new(1, 1);
@@ -1283,6 +1303,7 @@ namespace GenOnlineService
 			// Always enqueue; the TickWebsocket drain loop is the sole sender,
 			// ensuring WebSocket.SendAsync is never called concurrently.
 			m_lstPendingWebsocketSends.Enqueue(bytesJSON);
+			AppMetrics.AdjustWebSocketSendQueueDepth(1);
 		}
 
 		public async Task<UserWebSocketInstance> CloseWebsocket(WebSocketCloseStatus reason, string strReason)
@@ -1307,6 +1328,7 @@ namespace GenOnlineService
 				// start dequeing and sending
 				while (!tickToken.IsCancellationRequested && messagesSent < maxMessagesSendPerFrame && m_lstPendingWebsocketSends.TryDequeue(out byte[] packetData))
 				{
+					AppMetrics.AdjustWebSocketSendQueueDepth(-1);
 					await websocketForUser.SendAsync(packetData, WebSocketMessageType.Text, tickToken);
 					++messagesSent;
 				}
@@ -1315,6 +1337,19 @@ namespace GenOnlineService
 		
 		// TODO_CACHE: Size limit this?
 		ConcurrentQueue<byte[]> m_lstPendingWebsocketSends = new ConcurrentQueue<byte[]>();
+
+		public void DiscardPendingWebsocketSends()
+		{
+			int discarded = 0;
+			while (m_lstPendingWebsocketSends.TryDequeue(out _))
+			{
+				++discarded;
+			}
+			if (discarded > 0)
+			{
+				AppMetrics.AdjustWebSocketSendQueueDepth(-discarded);
+			}
+		}
 
 		public bool NeedsCleanup()
 		{
@@ -1517,7 +1552,14 @@ namespace GenOnlineService
 
 		public async Task SendAsync(byte[] buffer, WebSocketMessageType messageType, CancellationToken externalToken = default)
 		{
-			if (m_SockInternal != null)
+			if (m_SockInternal == null)
+			{
+				AppMetrics.RecordWebSocketOutbound("not_connected", buffer.Length);
+				return;
+			}
+
+			string outcome = "error";
+			try
 			{
 				// WebSocket.SendAsync must never be called concurrently on the same socket or the frame stream gets
 				// corrupted. Several paths (tick drain, pongs, direct sends) can send at the same time, so serialize here.
@@ -1576,15 +1618,24 @@ namespace GenOnlineService
 	
 						}
 					}
+					outcome = "success";
+				}
+				catch (OperationCanceledException)
+				{
+					outcome = "timeout";
 				}
 				catch
 				{
-
+					outcome = "error";
 				}
 				finally
 				{
 					m_SendLock.Release();
 				}
+			}
+			finally
+			{
+				AppMetrics.RecordWebSocketOutbound(outcome, buffer.Length);
 			}
 		}
 
@@ -2475,8 +2526,11 @@ namespace GenOnlineService
 
 		public static async Task<string?> GetPresignedURL(EMetadataFileType fileType, EScreenshotType screenshotTypeIfScreenshot, UInt64 matchID, Int64 userID, int slotIndex, DateTime matchStartTime)
 		{
+			string outcome = "error";
+			using IDisposable measurement = AppMetrics.MeasureDependency("object_storage", "presign_upload", () => outcome);
 			if (!s_uploadsEnabled || m_s3client == null)
 			{
+				outcome = "disabled";
 				return null;
 			}
 
@@ -2527,6 +2581,7 @@ namespace GenOnlineService
 
 			if (strFileName == null)
 			{
+				outcome = "invalid_file_type";
 				return null;
 			}
 
@@ -2548,7 +2603,9 @@ namespace GenOnlineService
 
 			await Database.MatchHistory.AttachMatchHistoryMetadata(db, matchID, slotIndex, strFileName, fileType);
 
-			return await m_s3client.GetPreSignedURLAsync(request);
+			string url = await m_s3client.GetPreSignedURLAsync(request);
+			outcome = "success";
+			return url;
 		}
 	}
 
@@ -2610,9 +2667,12 @@ namespace GenOnlineService
 
 		public static async Task<TURNCredentialContainer?> CreateCredentialsForUser(Int64 userID)
 		{
+			string outcome = "error";
+			using IDisposable measurement = AppMetrics.MeasureDependency("turn", "create_credentials", () => outcome);
 #if DEBUG
 			TURNCredentialContainer fakeCreds = new("fake", "fake");
 			await Task.Delay(1);
+			outcome = "success";
 			return fakeCreds;
 #endif
 			GetTURNConfig(out int TurnTTL, out string TurnToken, out string TurnKey, out bool bShouldInvalidateTokensAutomatically);
@@ -2693,11 +2753,13 @@ namespace GenOnlineService
 									{
 										TURNCredentialContainer creds = new(entry.username, entry.credential);
 										g_DictTURNUsernames[userID] = entry.username;
+										outcome = "success";
 										return creds;
 									}
 								}
 							}
 
+							outcome = "invalid_response";
 							return null;
 						}
 						catch
@@ -2705,8 +2767,10 @@ namespace GenOnlineService
 
 						}
 
+						outcome = "invalid_response";
 						return null;
 					}
+					outcome = "http_error";
 				}
 				catch
 				{

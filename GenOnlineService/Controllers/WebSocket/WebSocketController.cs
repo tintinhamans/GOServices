@@ -23,6 +23,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Buffers;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Security.Claims;
 using System.Text;
@@ -52,6 +53,7 @@ namespace GenOnlineService.Controllers
 
 		private static void QueueChatRateLimited(UserSession session, SharedUserData userData, string scopeType)
 		{
+			AppMetrics.RecordChatRateLimitRejection(scopeType);
 			if (!userData.TryConsumeChatRateLimitNotice())
 			{
 				return;
@@ -453,6 +455,7 @@ namespace GenOnlineService.Controllers
 			}
 
 			ReadOnlySpan<byte> payload = buffer.AsSpan();
+			int payloadLength = payload.Length;
 
 			WSMessageEnvelope envelope;
 			try
@@ -462,10 +465,19 @@ namespace GenOnlineService.Controllers
 			catch
 			{
 				// malformed
+				AppMetrics.RecordWebSocketMessage("unknown", "malformed", payloadLength);
 				return;
 			}
 
 			EWebSocketMessageID msgID = (EWebSocketMessageID)envelope.msg_id;
+			string messageType = Enum.IsDefined(msgID) ? msgID.ToString().ToLowerInvariant() : "unknown";
+			string messageOutcome = messageType == "unknown" ? "ignored" : "success";
+			using Activity? messageActivity = AppMetrics.StartActivity(
+				"websocket.message.process",
+				ActivityKind.Consumer,
+				new("messaging.system", "websocket"),
+				new("messaging.operation.type", "process"),
+				new("message.type", messageType));
 
 			// Only allocate a Dictionary when we actually need arbitrary fields
 			Dictionary<string, JsonElement>? data = null;
@@ -1289,10 +1301,20 @@ namespace GenOnlineService.Controllers
 					}
 				}
 			}
-			catch
+			catch (Exception ex)
 			{
-				// swallow per-message exceptions to avoid killing the loop
-				// you can add Sentry logging here if desired
+				messageOutcome = "error";
+				AppMetrics.RecordException(messageActivity, ex);
+				_logger.LogError(
+					ex,
+					"WebSocket message {MessageType} failed for user {UserId}",
+					messageType,
+					sourceUserSession.m_UserID);
+			}
+			finally
+			{
+				messageActivity?.SetTag("message.outcome", messageOutcome);
+				AppMetrics.RecordWebSocketMessage(messageType, messageOutcome, payloadLength);
 			}
 		}
 	}
