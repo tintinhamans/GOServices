@@ -1364,7 +1364,11 @@ namespace GenOnlineService
 
 					await lobbyManager.Cleanup();
 
-					PendingLoginManager.CleanupExpiredLogins();
+					int expiredLoginCount = PendingLoginManager.CleanupExpiredLogins();
+					if (expiredLoginCount > 0)
+					{
+						app.Logger.LogDebug("Removed {ExpiredLoginCount} expired pending logins", expiredLoginCount);
+					}
 				}
 				catch (Exception ex)
 				{

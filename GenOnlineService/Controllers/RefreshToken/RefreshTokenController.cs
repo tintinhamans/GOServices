@@ -131,7 +131,6 @@ namespace GenOnlineService.Controllers.RefreshToken
 			catch (Exception ex)
 			{
 				_logger.LogError(ex, "RefreshToken failed");
-				SentrySdk.CaptureException(ex);
 
 				result.result = EPendingLoginState.LoginFailed;
 				Response.StatusCode = (int)HttpStatusCode.InternalServerError;

@@ -706,7 +706,7 @@ public class DiscordBot
 
 	private static Task LogAsync(LogMessage log)
 	{
-		s_log.LogInformation("Discord: {DiscordLogMessage}", log.ToString());
+		s_log.LogDebug("Discord: {DiscordLogMessage}", log.ToString());
 		return Task.CompletedTask;
 	}
 

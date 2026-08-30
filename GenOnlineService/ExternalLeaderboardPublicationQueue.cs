@@ -46,7 +46,6 @@ namespace GenOnlineService
 				catch (Exception ex)
 				{
 					_logger.LogError(ex, "External leaderboard publication poll failed");
-					SentrySdk.CaptureException(ex);
 				}
 
 				try
@@ -89,7 +88,6 @@ namespace GenOnlineService
 				catch (Exception ex)
 				{
 					_logger.LogError(ex, "External publication bookkeeping failed for match {MatchId}", item.MatchId);
-					SentrySdk.CaptureException(ex);
 					throw;
 				}
 			}
@@ -265,7 +263,6 @@ namespace GenOnlineService
 			if (!retry)
 			{
 				_logger.LogError(publicationException, "External publication for match {MatchId} stopped after {Attempt} attempts", item.MatchId, item.Attempt);
-				SentrySdk.CaptureException(publicationException);
 			}
 		}
 

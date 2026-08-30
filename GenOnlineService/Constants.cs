@@ -385,7 +385,7 @@ namespace GenOnlineService
 			if (bIsReconnect)
 			{
 				// this is a reconnect, re-use cache
-				s_log.LogInformation("WebSocket reconnect for user {UserId} ({SessionType})", ownerID, sessionType);
+				s_log.LogDebug("WebSocket reconnect for user {UserId} ({SessionType})", ownerID, sessionType);
 
 				// if its a reconnect, and we dont have cache OR shared data, its probably a server restart, so return null
 				if (userCacheData == null)
@@ -427,7 +427,7 @@ namespace GenOnlineService
 			}
 			else
 			{
-				s_log.LogInformation("WebSocket connect for user {UserId} ({SessionType})", ownerID, sessionType);
+				s_log.LogDebug("WebSocket connect for user {UserId} ({SessionType})", ownerID, sessionType);
 
 				// how many other sessions do they have online?
 				bool bIsFirstSessionForUser = WebSocketManager.GetAllDataFromUser(ownerID).Count == 0;
@@ -435,7 +435,7 @@ namespace GenOnlineService
 				// kill any existing sessions for this user of same session type
 				if (m_dictWebsockets[sessionType].TryGetValue(ownerID, out UserWebSocketInstance? existingSession))
 				{
-					s_log.LogInformation("Killing existing session for {UserId} ({DisplayName})", ownerID, strDisplayName);
+					s_log.LogDebug("Killing existing session for {UserId} ({DisplayName})", ownerID, strDisplayName);
 					await DeleteSession(ownerID, sessionType, existingSession, !bIsReconnect);
 				}
 
@@ -487,7 +487,7 @@ namespace GenOnlineService
 			// that keeps running and sending on a socket nobody owns any more.
 			if (m_dictWebsockets[sessionType].TryRemove(ownerID, out UserWebSocketInstance? supersededSess) && supersededSess != null)
 			{
-				s_log.LogInformation("Closing superseded websocket for {UserId} ({DisplayName})", ownerID, strDisplayName);
+				s_log.LogDebug("Closing superseded websocket for {UserId} ({DisplayName})", ownerID, strDisplayName);
 				await supersededSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
 			}
 

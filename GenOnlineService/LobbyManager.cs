@@ -1482,7 +1482,6 @@ public async Task FinalizeACChecks()
 					catch (Exception ex)
 					{
 						s_log.LogError(ex, "Lobby {LobbyId}: UpdateState placeholder creation failed", LobbyID);
-						SentrySdk.CaptureException(ex);
 					}
 
 					// calculate first probe time
@@ -1771,7 +1770,6 @@ public async Task FinalizeACChecks()
 				catch (Exception ex)
 				{
 					_logger.LogError(ex, "Failed to destroy lobby {LobbyId}", lobbyToDestroy.LobbyID);
-					SentrySdk.CaptureException(ex);
 				}
 			}
 		}
@@ -2043,7 +2041,6 @@ public async Task FinalizeACChecks()
 			catch (Exception ex)
 			{
 				_logger.LogError(ex, "DeleteLobby failed");
-				SentrySdk.CaptureException(ex);
 				return false;
 			}
 		}

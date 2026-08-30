@@ -296,7 +296,6 @@ namespace GenOnlineService.Controllers
 				{
 					// Log unexpected errors
 					_logger.LogError(ex, "WebSocket error");
-					SentrySdk.CaptureException(ex);
 					break;
 				}
 
@@ -354,7 +353,7 @@ namespace GenOnlineService.Controllers
 			}
 
 			SharedUserData? sourceData = WebSocketManager.GetSharedDataForUser(user_id);
-			_logger.LogInformation("WebSocket disconnect for {DisplayName}", sourceData?.m_strDisplayName ?? "NULL");
+			_logger.LogDebug("WebSocket disconnect for user {UserId}", user_id);
 
 			// close the session
 			if (wsSess != null)

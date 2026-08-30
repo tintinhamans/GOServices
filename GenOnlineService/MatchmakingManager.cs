@@ -1836,6 +1836,7 @@ static class MatchmakingManager
 		// validate the request - a bad playlist or out of range map index from a client must never reach a bucket
 		if (!g_Playlists.TryGetValue(playlistID, out Playlist? playlist))
 		{
+			s_log.LogWarning("User {UserId} requested unavailable matchmaking playlist {PlaylistId}", plr.m_UserID, playlistID);
 			await SendMatchmakingMessage(plr, "That playlist is not available. Matchmaking was not started.");
 			return;
 		}
@@ -1848,6 +1849,7 @@ static class MatchmakingManager
 		int minSelectedMaps = Math.Max(1, playlist.MinSelectedMaps);
 		if (validatedMapIndices.Count < minSelectedMaps)
 		{
+			s_log.LogWarning("User {UserId} selected {SelectedMapCount} valid maps for playlist {PlaylistId}; minimum is {MinimumMapCount}", plr.m_UserID, validatedMapIndices.Count, playlistID, minSelectedMaps);
 			await SendMatchmakingMessage(plr, String.Format("You must select at least {0} valid map(s) to matchmake in this playlist.", minSelectedMaps));
 			return;
 		}
@@ -1879,11 +1881,13 @@ static class MatchmakingManager
 
 		if (bCancellationRejected)
 		{
+			s_log.LogWarning("User {UserId} could not restart matchmaking because the game is starting", plr.m_UserID);
 			await SendMatchmakingMessage(plr, "Matchmaking cannot be restarted because your game is already starting.");
 			return;
 		}
 
-        await SendMatchmakingMessage(plr, "Started matchmaking... Searching for players...");
+		s_log.LogInformation("User {UserId} started matchmaking in playlist {PlaylistId} with {SelectedMapCount} maps", plr.m_UserID, playlistID, validatedMapIndices.Count);
+		await SendMatchmakingMessage(plr, "Started matchmaking... Searching for players...");
 	}
 
 	private static async Task<bool> RemovePlayerFromAllBuckets(UserSession plr)

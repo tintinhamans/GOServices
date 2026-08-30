@@ -146,7 +146,7 @@ namespace GenOnlineService
                 {
                     sw.Stop();
 
-                    s_log.LogInformation("External Match Ingest POST response for match {MatchId} received in {ElapsedMilliseconds} ms with status {StatusCode}", matchID, sw.ElapsedMilliseconds, response.StatusCode);
+                    s_log.LogDebug("External Match Ingest POST response for match {MatchId} received in {ElapsedMilliseconds} ms with status {StatusCode}", matchID, sw.ElapsedMilliseconds, response.StatusCode);
 
                     responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
                     if (!response.IsSuccessStatusCode)
@@ -183,7 +183,7 @@ namespace GenOnlineService
                         using (var response = await client.SendAsync(request))
                         {
                             sw.Stop();
-                            s_log.LogInformation("External ELO API call for player {PlayerId} took {ElapsedMilliseconds} ms with status {StatusCode}", playerId, sw.ElapsedMilliseconds, response.StatusCode);
+                            s_log.LogDebug("External ELO API call for player {PlayerId} took {ElapsedMilliseconds} ms with status {StatusCode}", playerId, sw.ElapsedMilliseconds, response.StatusCode);
 
                             if (!response.IsSuccessStatusCode)
                             {
