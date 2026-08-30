@@ -26,6 +26,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.WebSockets;
 using System.Security.Claims;
@@ -867,6 +869,7 @@ static class MatchmakingManager
 		private async Task StartGameAfterSuccessfulMeshCheck(Lobby lobby)
 		{
 			s_log.LogInformation("Starting QuickMatch game for lobby {LobbyId}", lobby.LobbyID);
+			AppMetrics.RecordMatchmakingMatch(PlaylistID.ToString(CultureInfo.InvariantCulture), "started");
 
 			WebSocketMessage_MatchmakerStartGame startGameAction = new WebSocketMessage_MatchmakerStartGame();
 			startGameAction.msg_id = (int)EWebSocketMessageID.MATCHMAKING_ACTION_START_GAME;
@@ -877,6 +880,8 @@ static class MatchmakingManager
 				UserSession? memberSession = member.GetAssociatedSession();
 				if (memberSession != null)
 				{
+					memberSession.IsRegisteredForMatchmaking = false;
+					MatchmakingManager.RecordQueueExit(memberSession, "matched");
 					memberSession.QueueWebsocketSend(bytesJSON);
 				}
 			}
@@ -953,6 +958,7 @@ static class MatchmakingManager
 				m_bHasStartedCountdown = false;
 				m_bWaitingOnMeshConnectivityChecks = false;
 			}
+			AppMetrics.RecordMatchmakingMatch(PlaylistID.ToString(CultureInfo.InvariantCulture), "setup_aborted");
 
 			LobbyManager lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
 			Lobby? quickMatchLobby = lobbyManager.GetLobby(m_LobbyID);
@@ -1329,6 +1335,8 @@ static class MatchmakingManager
 								UserSession? memberSession = member.GetAssociatedSession();
 								if (memberSession != null)
 								{
+									memberSession.IsRegisteredForMatchmaking = false;
+									MatchmakingManager.RecordQueueExit(memberSession, "setup_failed");
 									await SendMatchmakingMessage(memberSession, "The QuickMatch lobby could not be created. Please try matchmaking again.");
 								}
 							}
@@ -1353,6 +1361,8 @@ static class MatchmakingManager
 									if (memberSession != null)
 									{
 										s_log.LogInformation("User {UserId} failed to join QuickMatch lobby {LobbyId} in time; dropping from bucket", memberSession.m_UserID, m_LobbyID);
+										memberSession.IsRegisteredForMatchmaking = false;
+										MatchmakingManager.RecordQueueExit(memberSession, "join_timeout");
 										await SendMatchmakingMessage(memberSession, "You failed to join the QuickMatch lobby in time and have been removed from matchmaking.");
 									}
 
@@ -1368,6 +1378,8 @@ static class MatchmakingManager
 									UserSession? memberSession = member.GetAssociatedSession();
 									if (memberSession != null)
 									{
+										memberSession.IsRegisteredForMatchmaking = false;
+										MatchmakingManager.RecordQueueExit(memberSession, "insufficient_players");
 										await SendMatchmakingMessage(memberSession, "Not enough players joined the QuickMatch lobby. Please try matchmaking again.");
 									}
 								}
@@ -1558,6 +1570,13 @@ static class MatchmakingManager
 		return totalPlayers;
 	}
 
+	public static int GetTotalActiveBucketsInPlaylist(UInt16 playlistID)
+	{
+		return m_dictMatchmakingBuckets.TryGetValue(playlistID, out ConcurrentBag<MatchmakingBucket>? buckets)
+			? buckets.Count(bucket => !bucket.IsMergedAway())
+			: 0;
+	}
+
 	public static async Task Tick()
 	{
 		// TODO_QUICKMATCH: Move to init func, maybe dont use static for matchmakingmanager
@@ -1649,6 +1668,8 @@ static class MatchmakingManager
 
 					if (thisSessionUserData == null)
 					{
+						thisSession.IsRegisteredForMatchmaking = false;
+						RecordQueueExit(thisSession, "session_unavailable");
 						lstDestroy.Add(wrSession);
 					}
 					else
@@ -1657,6 +1678,7 @@ static class MatchmakingManager
 						if (thisSessionStats == null)
 						{
 							thisSession.IsRegisteredForMatchmaking = false;
+							RecordQueueExit(thisSession, "stats_unavailable");
 							lstDestroy.Add(wrSession);
 							await SendMatchmakingMessage(thisSession, "Matchmaking could not start because your player statistics are unavailable. Please try again.");
 							continue;
@@ -1751,6 +1773,8 @@ static class MatchmakingManager
 						else
 						{
 							// invalid playlist somehow
+							thisSession.IsRegisteredForMatchmaking = false;
+							RecordQueueExit(thisSession, "playlist_unavailable");
 							lstDestroy.Add(wrSession);
 						}
 					}
@@ -1769,6 +1793,14 @@ static class MatchmakingManager
 			{
 				lstSessions.Remove(wrSession);
 			}
+		}
+
+		foreach (UInt16 playlistID in g_Playlists.Keys)
+		{
+			AppMetrics.RecordMatchmakingSnapshot(
+				playlistID.ToString(CultureInfo.InvariantCulture),
+				GetTotalQueuedPlayersInPlaylist(playlistID),
+				GetTotalActiveBucketsInPlaylist(playlistID));
 		}
 	}
 
@@ -1797,6 +1829,16 @@ static class MatchmakingManager
 				lstSessions.Remove(wrSession);
 			}
 		}
+	}
+
+	internal static void RecordQueueExit(UserSession session, string outcome)
+	{
+		long startedAt = Interlocked.Exchange(ref session.MatchmakingStartedTimestamp, 0);
+		TimeSpan duration = startedAt > 0 ? Stopwatch.GetElapsedTime(startedAt) : TimeSpan.Zero;
+		AppMetrics.RecordMatchmakingQueueExit(
+			session.MatchmakingPlaylistID.ToString(CultureInfo.InvariantCulture),
+			outcome,
+			duration);
 	}
 
 	private static async Task<bool> TryRequeueRegisteredPlayer(UserSession session, byte[] requeueActionJSON)
@@ -1833,9 +1875,15 @@ static class MatchmakingManager
 
 	public static async Task RegisterPlayer(UserSession plr, UInt16 playlistID, List<int> mapIndices, UInt32 exe_crc, UInt32 ini_crc, EKnownAnticheatID anticheatID)
 	{
+		long startedAt = Stopwatch.GetTimestamp();
+		using Activity? activity = AppMetrics.StartActivity("matchmaking.register");
+		activity?.SetTag("user.id", plr.m_UserID);
+		activity?.SetTag("matchmaking.playlist_id", playlistID);
 		// validate the request - a bad playlist or out of range map index from a client must never reach a bucket
 		if (!g_Playlists.TryGetValue(playlistID, out Playlist? playlist))
 		{
+			AppMetrics.RecordMatchmakingRegistration("unavailable_playlist", Stopwatch.GetElapsedTime(startedAt));
+			activity?.SetTag("matchmaking.outcome", "unavailable_playlist");
 			s_log.LogWarning("User {UserId} requested unavailable matchmaking playlist {PlaylistId}", plr.m_UserID, playlistID);
 			await SendMatchmakingMessage(plr, "That playlist is not available. Matchmaking was not started.");
 			return;
@@ -1849,28 +1897,37 @@ static class MatchmakingManager
 		int minSelectedMaps = Math.Max(1, playlist.MinSelectedMaps);
 		if (validatedMapIndices.Count < minSelectedMaps)
 		{
+			AppMetrics.RecordMatchmakingRegistration("insufficient_maps", Stopwatch.GetElapsedTime(startedAt));
+			activity?.SetTag("matchmaking.outcome", "insufficient_maps");
 			s_log.LogWarning("User {UserId} selected {SelectedMapCount} valid maps for playlist {PlaylistId}; minimum is {MinimumMapCount}", plr.m_UserID, validatedMapIndices.Count, playlistID, minSelectedMaps);
 			await SendMatchmakingMessage(plr, String.Format("You must select at least {0} valid map(s) to matchmake in this playlist.", minSelectedMaps));
 			return;
 		}
 
 		bool bCancellationRejected;
+		bool wasRegistered;
 		await plr.MatchmakingStateLock.WaitAsync();
 		try
 		{
 			// A duplicate registration must not leave the player queued twice or in two buckets.
+			wasRegistered = plr.IsRegisteredForMatchmaking;
 			plr.IsRegisteredForMatchmaking = false;
 			RemovePendingSession(plr);
 			bCancellationRejected = await RemovePlayerFromAllBuckets(plr);
 
 			if (!bCancellationRejected)
 			{
+				if (wasRegistered)
+				{
+					RecordQueueExit(plr, "restarted");
+				}
 				plr.MatchmakingPlaylistID = playlistID;
 				plr.MatchmakingMapIndicies = new ConcurrentList<int>(validatedMapIndices);
 				plr.ExeCRC = exe_crc;
 				plr.IniCRC = ini_crc;
 				plr.AnticheatID = anticheatID;
 				plr.IsRegisteredForMatchmaking = true;
+				plr.MatchmakingStartedTimestamp = Stopwatch.GetTimestamp();
 				lstSessions.Add(new WeakReference<UserSession>(plr));
 			}
 		}
@@ -1881,11 +1938,15 @@ static class MatchmakingManager
 
 		if (bCancellationRejected)
 		{
+			AppMetrics.RecordMatchmakingRegistration("start_in_progress", Stopwatch.GetElapsedTime(startedAt));
+			activity?.SetTag("matchmaking.outcome", "start_in_progress");
 			s_log.LogWarning("User {UserId} could not restart matchmaking because the game is starting", plr.m_UserID);
 			await SendMatchmakingMessage(plr, "Matchmaking cannot be restarted because your game is already starting.");
 			return;
 		}
 
+		AppMetrics.RecordMatchmakingRegistration("accepted", Stopwatch.GetElapsedTime(startedAt));
+		activity?.SetTag("matchmaking.outcome", "accepted");
 		s_log.LogInformation("User {UserId} started matchmaking in playlist {PlaylistId} with {SelectedMapCount} maps", plr.m_UserID, playlistID, validatedMapIndices.Count);
         await SendMatchmakingMessage(plr, "Started matchmaking... Searching for players...");
 	}
@@ -1948,6 +2009,7 @@ static class MatchmakingManager
 		// leave QM lobby too
 		if (!bCancellationRejected)
 		{
+			RecordQueueExit(plr, "withdrawn");
 			s_log.LogDebug("User {UserId} leaving any lobby during matchmaking cleanup", plr.m_UserID);
 			await lobbyManager.LeaveAnyLobby(plr.m_UserID);
 		}
