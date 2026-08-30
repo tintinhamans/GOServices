@@ -49,10 +49,12 @@ namespace GenOnlineService.Controllers.RefreshToken
 	public class RefreshTokenController : ControllerBase
 	{
 		private readonly IDbContextFactory<AppDbContext> _dbFactory;
+		private readonly ILogger<RefreshTokenController> _logger;
 
-		public RefreshTokenController(IDbContextFactory<AppDbContext> dbFactory)
+		public RefreshTokenController(IDbContextFactory<AppDbContext> dbFactory, ILogger<RefreshTokenController> logger)
 		{
 			_dbFactory = dbFactory;
+			_logger = logger;
 		}
 
 		[HttpPost(Name = "PostRefreshToken")]
@@ -128,7 +130,7 @@ namespace GenOnlineService.Controllers.RefreshToken
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"[ERROR] RefreshToken failed: {ex.Message}");
+				_logger.LogError(ex, "RefreshToken failed");
 				SentrySdk.CaptureException(ex);
 
 				result.result = EPendingLoginState.LoginFailed;

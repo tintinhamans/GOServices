@@ -180,6 +180,7 @@ public class Playlist
 
 static class MatchmakingManager
 {
+	private static readonly ILogger s_log = AppLog.For(typeof(MatchmakingManager));
 	// World Series 2026 Qualification in September requires the matchmaking to be
 	// based off the monthly ELO.
 	internal static int GetMatchmakingElo(PlayerStats stats)
@@ -303,6 +304,7 @@ static class MatchmakingManager
 
 	public class MatchmakingBucket
 	{
+		private static readonly ILogger s_log = AppLog.For(typeof(MatchmakingBucket));
 		private ConcurrentList<MatchmakingBucketMember> m_lstMembers = new();
 		public ConcurrentList<int> lstMapIndices { get; set; } = new();
 
@@ -451,7 +453,7 @@ static class MatchmakingManager
 			else
 			{
 				// pick a sensible default (biggest map in playlist), probably not what the players asked for, but we cant play on no map
-				Console.WriteLine("WARNING: No mutually agreed upon map found for matchmaking bucket, falling back to largest map in playlist");
+				s_log.LogWarning("No mutually agreed upon map found for matchmaking bucket; falling back to the largest map in the playlist");
 
 				if (MatchmakingManager.g_Playlists.TryGetValue(PlaylistID, out Playlist? playlist))
 				{
@@ -864,7 +866,7 @@ static class MatchmakingManager
 
 		private async Task StartGameAfterSuccessfulMeshCheck(Lobby lobby)
 		{
-			Console.WriteLine("START GAME");
+			s_log.LogInformation("Starting QuickMatch game for lobby {LobbyId}", lobby.LobbyID);
 
 			WebSocketMessage_MatchmakerStartGame startGameAction = new WebSocketMessage_MatchmakerStartGame();
 			startGameAction.msg_id = (int)EWebSocketMessageID.MATCHMAKING_ACTION_START_GAME;
@@ -1320,7 +1322,7 @@ static class MatchmakingManager
 						if (lobby == null)
 						{
 							// the lobby went away underneath us (deleted/failed) - don't leave everyone stuck waiting forever
-							Console.WriteLine("Matchmaking bucket lost its QuickMatch lobby {0} while waiting on joins, abandoning bucket", m_LobbyID);
+							s_log.LogWarning("Matchmaking bucket lost QuickMatch lobby {LobbyId} while waiting on joins; abandoning bucket", m_LobbyID);
 
 							foreach (MatchmakingBucketMember member in m_lstMembers)
 							{
@@ -1350,7 +1352,7 @@ static class MatchmakingManager
 								{
 									if (memberSession != null)
 									{
-										Console.WriteLine("User {0} failed to join QuickMatch lobby {1} in time, dropping from bucket", memberSession.m_UserID, m_LobbyID);
+										s_log.LogInformation("User {UserId} failed to join QuickMatch lobby {LobbyId} in time; dropping from bucket", memberSession.m_UserID, m_LobbyID);
 										await SendMatchmakingMessage(memberSession, "You failed to join the QuickMatch lobby in time and have been removed from matchmaking.");
 									}
 
@@ -1906,7 +1908,7 @@ static class MatchmakingManager
 						LobbyMember? lobbyMember = lobby.GetMemberFromUserID(plr.m_UserID);
 						if (lobbyMember != null)
 						{
-							Console.WriteLine("User {0} Leave MM Lobby", plr.m_UserID);
+							s_log.LogDebug("User {UserId} leaving matchmaking lobby", plr.m_UserID);
 							await lobby.RemoveMember(lobbyMember);
 						}
 					}
@@ -1942,7 +1944,7 @@ static class MatchmakingManager
 		// leave QM lobby too
 		if (!bCancellationRejected)
 		{
-			Console.WriteLine("[Source 4] User {0} Leave Any Lobby", plr.m_UserID);
+			s_log.LogDebug("User {UserId} leaving any lobby during matchmaking cleanup", plr.m_UserID);
 			await lobbyManager.LeaveAnyLobby(plr.m_UserID);
 		}
 	}

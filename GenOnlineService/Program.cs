@@ -1338,9 +1338,7 @@ namespace GenOnlineService
 			}
 			else
 			{
-				Console.ForegroundColor = ConsoleColor.Red;
-				Console.WriteLine("*** WARNING: Core:enforce_https is disabled. Bearer tokens will be sent in clear text over any plain-HTTP listener. ***");
-				Console.ForegroundColor = ConsoleColor.Gray;
+				app.Logger.LogWarning("Core:enforce_https is disabled. Bearer tokens will be sent in clear text over any plain-HTTP listener.");
 			}
 
 			app.UseCors();
@@ -1370,7 +1368,7 @@ namespace GenOnlineService
 				}
 				catch (Exception ex)
 				{
-					Console.WriteLine($"[timerCleanup] Exception: {ex}");
+					app.Logger.LogError(ex, "Cleanup timer failed");
 				}
 				finally
 				{
@@ -1393,7 +1391,7 @@ namespace GenOnlineService
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[timerTick lobby] Exception: {ex}");
+						app.Logger.LogError(ex, "Lobby tick timer failed");
 					}
 					finally
 					{
@@ -1417,7 +1415,7 @@ namespace GenOnlineService
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[cleanupTick lobby] Exception: {ex}");
+						app.Logger.LogError(ex, "Lobby cleanup timer failed");
                     }
                     finally
                     {
@@ -1439,7 +1437,7 @@ namespace GenOnlineService
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[timerTick matchmaking] Exception: {ex}");
+						app.Logger.LogError(ex, "Matchmaking tick timer failed");
 					}
 					finally
 					{
@@ -1461,7 +1459,7 @@ namespace GenOnlineService
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[timerTick rooms] Exception: {ex}");
+						app.Logger.LogError(ex, "Network-room tick timer failed");
 					}
 					finally
 					{
@@ -1488,7 +1486,7 @@ namespace GenOnlineService
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[timerTick dailystats] Exception: {ex}");
+						app.Logger.LogError(ex, "Daily-stats timer failed");
 					}
 					finally
 					{
@@ -1515,7 +1513,7 @@ namespace GenOnlineService
 					}
 					catch (Exception ex)
 					{
-						Console.WriteLine($"[timerTick tokenrevocation] Exception: {ex}");
+						app.Logger.LogError(ex, "Token-revocation timer failed");
 					}
 					finally
 					{
@@ -1527,8 +1525,7 @@ namespace GenOnlineService
 
 			AppDomain.CurrentDomain.ProcessExit += (_, _) =>
 			{
-				Console.ForegroundColor = ConsoleColor.Red;
-				Console.WriteLine("EXIT REQUESTED!");
+				app.Logger.LogInformation("Exit requested");
 			};
 
 			// create a token
