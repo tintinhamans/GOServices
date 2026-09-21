@@ -197,9 +197,11 @@ namespace Database
 						.SetProperty(u => u.BanVerifiedBy, "x64")
 						.SetProperty(u => u.BanAliases, "")
 					);
+				AppMetrics.RecordAntiCheatAction("ban", "success");
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordAntiCheatAction("ban", "error");
 				s_log.LogError(ex, "AC_BanUser failed");
 			}
 		}
@@ -223,9 +225,11 @@ namespace Database
 				});
 
 				await db.SaveChangesAsync();
+				AppMetrics.RecordAntiCheatAction("crc_review", "success");
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordAntiCheatAction("crc_review", "error");
 				s_log.LogError(ex, "FlagAccountForReview failed");
 			}
 		}
@@ -251,9 +255,11 @@ namespace Database
 				});
 
 				await db.SaveChangesAsync();
+				AppMetrics.RecordAntiCheatAction("module_review", "success");
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordAntiCheatAction("module_review", "error");
 				s_log.LogError(ex, "FlagAccountForReview_Module failed");
 			}
 		}
@@ -276,9 +282,11 @@ namespace Database
 				});
 
 				await db.SaveChangesAsync();
+				AppMetrics.RecordAntiCheatAction("probe_review", "success");
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordAntiCheatAction("probe_review", "error");
 				s_log.LogError(ex, "FlagAccountForReview_SuspectProbes failed");
 			}
 		}
@@ -298,9 +306,11 @@ namespace Database
 				});
 
 				await db.SaveChangesAsync();
+				AppMetrics.RecordAntiCheatAction("new_account_review", "success");
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordAntiCheatAction("new_account_review", "error");
 				s_log.LogError(ex, "FlagAccountForReview_NewAccount_FirstMatches failed");
 			}
 		}

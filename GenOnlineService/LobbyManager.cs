@@ -76,6 +76,7 @@ namespace GenOnlineService
 		public UInt64 MatchID { get; private set; } = 0;
 
 		public DateTime TimeCreated { get; private set; } = DateTime.UtcNow;
+		public DateTime? TimeStarted { get; private set; }
 
 		[JsonIgnore]
 		public bool PendingFullMeshConnectivityChecks { get; private set; } = false;
@@ -634,6 +635,7 @@ namespace GenOnlineService
 			DateTime abandonTime = DateTime.UtcNow;
 			if (TimePlayerAbandonedIngame.TryAdd(userId, abandonTime))
 			{
+				AppMetrics.RecordMatchPlayerEvent("abandon", LobbyType.ToMetricLabel());
 				s_log.LogInformation("Lobby {LobbyId}: recorded in-game abandon for user {UserId} at {AbandonTime}", LobbyID, userId, abandonTime);
 			}
 		}
@@ -646,6 +648,7 @@ namespace GenOnlineService
 		{
 			if (TimePlayerAbandonedIngame.TryRemove(userId, out _))
 			{
+				AppMetrics.RecordMatchPlayerEvent("reconnected", LobbyType.ToMetricLabel());
 				s_log.LogInformation("Lobby {LobbyId}: cleared in-game abandon record for reconnected user {UserId}", LobbyID, userId);
 			}
 		}
@@ -659,6 +662,7 @@ namespace GenOnlineService
 		{
 			if (ReportedOutcomes.TryAdd(userId, bWon))
 			{
+				AppMetrics.RecordMatchPlayerEvent(bWon ? "reported_win" : "reported_loss", LobbyType.ToMetricLabel());
 				s_log.LogInformation("Lobby {LobbyId}: recorded reported outcome for user {UserId}, won={Won}", LobbyID, userId, bWon);
 			}
 		}
@@ -1209,6 +1213,7 @@ public async Task FinalizeACChecks()
 			// TODO_LOBBY: Optimize this
 			Int64 UserID = member.UserID;
 			s_log.LogInformation("User {UserId} left lobby {LobbyId}", UserID, LobbyID);
+			AppMetrics.RecordLobbyOperation("leave", "success", LobbyType.ToMetricLabel());
 
 			// AC dergister
 			WebSocketMessage_ACDeregisterPlayer remotePlayerAcMsg = new WebSocketMessage_ACDeregisterPlayer();
@@ -1448,14 +1453,35 @@ public async Task FinalizeACChecks()
 
 		public async Task UpdateState(ELobbyState state)
 		{
+			ELobbyState previousState;
 			await g_SlotLock.WaitAsync();
 			try
 			{
+				previousState = State;
 				State = state;
 			}
 			finally
 			{
 				g_SlotLock.Release();
+			}
+
+			if (previousState != state)
+			{
+				string lobbyType = LobbyType.ToMetricLabel();
+				AppMetrics.RecordLobbyStateTransition(
+					lobbyType,
+					previousState.ToMetricLabel(),
+					state.ToMetricLabel());
+
+				if (state == ELobbyState.INGAME)
+				{
+					TimeStarted = DateTime.UtcNow;
+					AppMetrics.RecordMatchOperation("start", "success", lobbyType);
+				}
+				else if (state == ELobbyState.COMPLETE && TimeStarted is { } startedAt)
+				{
+					AppMetrics.RecordMatchOperation("complete", "success", lobbyType, DateTime.UtcNow - startedAt);
+				}
 			}
 
 			// if start, init our AC probe
@@ -1817,6 +1843,7 @@ public async Task FinalizeACChecks()
 
 			// Send initial lobby state and invalidate room listings.
 			newLobby.DirtyRetransmitLobbyList();
+			AppMetrics.RecordLobbyOperation("create", "success", lobbyType.ToMetricLabel());
 
 			return newLobbyID;
 		}
@@ -1836,15 +1863,40 @@ public async Task FinalizeACChecks()
 			if (lobbyPrefs != null)
 			{
 				bool bAdded = await lobby.AddMember(playerSession, strDisplayName, userPreferredPort, bHasMap, lobbyPrefs);
+				AppMetrics.RecordLobbyOperation(
+					"join",
+					bAdded ? "success" : "rejected",
+					lobby.LobbyType.ToMetricLabel());
 				return bAdded;
 			}
 
+			AppMetrics.RecordLobbyOperation("join", "missing_preferences", lobby.LobbyType.ToMetricLabel());
 			return false;
 		}
 
 		public int GetNumLobbies()
 		{
 			return m_dictLobbies.Count;
+		}
+
+		public void RecordTelemetrySnapshot()
+		{
+			Lobby[] lobbies = m_dictLobbies.Values.ToArray();
+			ELobbyState[] states = [ELobbyState.GAME_SETUP, ELobbyState.INGAME, ELobbyState.COMPLETE];
+			foreach (ELobbyType lobbyType in Enum.GetValues<ELobbyType>())
+			{
+				foreach (ELobbyState state in states)
+				{
+					Lobby[] matching = lobbies
+						.Where(lobby => lobby.LobbyType == lobbyType && lobby.State == state)
+						.ToArray();
+					AppMetrics.RecordLobbySnapshot(
+						lobbyType.ToMetricLabel(),
+						state.ToMetricLabel(),
+						matching.Length,
+						matching.Sum(lobby => lobby.GetNumberOfHumans()));
+				}
+			}
 		}
 
 		public async Task CleanupUserLobbiesNotStarted(Int64 UserID)
@@ -2035,11 +2087,16 @@ public async Task FinalizeACChecks()
 
 					lobby.OnLobbyNeedsDestroyed -= HandleLobbyNeedsDestroyed;
 				}
+				AppMetrics.RecordLobbyOperation(
+					"delete",
+					bRemoved ? "success" : "not_found",
+					lobby.LobbyType.ToMetricLabel());
 
 				return bRemoved;
 			}
 			catch (Exception ex)
 			{
+				AppMetrics.RecordLobbyOperation("delete", "error", lobby.LobbyType.ToMetricLabel());
 				_logger.LogError(ex, "DeleteLobby failed");
 				return false;
 			}

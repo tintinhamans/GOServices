@@ -1,5 +1,6 @@
 using GenOnlineService.Controllers;
 using Microsoft.EntityFrameworkCore;
+using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
 
@@ -66,11 +67,17 @@ namespace GenOnlineService
 			List<Database.ExternalPublicationWorkItem> pending;
 			await using (AppDbContext db = await _dbFactory.CreateDbContextAsync(stoppingToken))
 			{
+				DateTime utcNow = DateTime.UtcNow;
 				pending = await Database.MatchHistory.GetPendingExternalPublications(
 					db,
-					DateTime.UtcNow,
+					utcNow,
 					c_MaxBatchSize,
 					stoppingToken);
+				(int depth, DateTime? oldestEnqueuedAt) = await Database.MatchHistory.GetExternalPublicationQueueSnapshot(db, stoppingToken);
+				TimeSpan oldestAge = oldestEnqueuedAt is { } enqueuedAt && enqueuedAt < utcNow
+					? utcNow - enqueuedAt
+					: TimeSpan.Zero;
+				AppMetrics.RecordExternalPublicationQueueSnapshot(depth, oldestAge);
 			}
 
 			foreach (Database.ExternalPublicationWorkItem item in pending)
@@ -99,6 +106,10 @@ namespace GenOnlineService
 			Database.ExternalPublicationWorkItem item,
 			CancellationToken stoppingToken)
 		{
+			long startedAt = Stopwatch.GetTimestamp();
+			using Activity? activity = AppMetrics.StartActivity("external_leaderboard.publish");
+			activity?.SetTag("match.id", item.MatchId);
+			activity?.SetTag("publication.attempt", item.Attempt);
 			try
 			{
 				MatchHistory_Entry? matchEntry;
@@ -125,7 +136,6 @@ namespace GenOnlineService
 				catch (Exception ex)
 				{
 					_logger.LogWarning(ex, "Match {MatchId} was ingested, but its optional ratings response could not be applied", item.MatchId);
-					SentrySdk.CaptureException(ex);
 				}
 
 				await using AppDbContext completionDb = await _dbFactory.CreateDbContextAsync(stoppingToken);
@@ -134,15 +144,21 @@ namespace GenOnlineService
 					(ulong)item.MatchId,
 					item.Attempt,
 					stoppingToken);
+				AppMetrics.RecordExternalPublicationResult("succeeded", Stopwatch.GetElapsedTime(startedAt));
+				activity?.SetTag("publication.outcome", "succeeded");
 			}
 			catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 			{
+				activity?.SetTag("publication.outcome", "cancelled");
+				AppMetrics.RecordExternalPublicationResult("cancelled", Stopwatch.GetElapsedTime(startedAt));
 				throw;
 			}
 			catch (Exception ex)
 			{
+				activity?.SetTag("publication.outcome", "failed");
+				AppMetrics.RecordException(activity, ex);
 				_logger.LogWarning(ex, "Failed to publish match {MatchId} to the external leaderboard on attempt {Attempt}", item.MatchId, item.Attempt);
-				await RecordFailure(item, ex, stoppingToken);
+				await RecordFailure(item, ex, Stopwatch.GetElapsedTime(startedAt), stoppingToken);
 			}
 		}
 
@@ -167,7 +183,6 @@ namespace GenOnlineService
 			catch (JsonException ex)
 			{
 				_logger.LogWarning(ex, "External Match Ingest response for match {MatchId} could not be deserialized", matchId);
-				SentrySdk.CaptureException(ex);
 				return;
 			}
 
@@ -244,6 +259,7 @@ namespace GenOnlineService
 		private async Task RecordFailure(
 			Database.ExternalPublicationWorkItem item,
 			Exception publicationException,
+			TimeSpan duration,
 			CancellationToken stoppingToken)
 		{
 			bool retry = IsRetryable(publicationException) && item.Attempt <= c_RetryDelays.Length;
@@ -262,7 +278,12 @@ namespace GenOnlineService
 
 			if (!retry)
 			{
+				AppMetrics.RecordExternalPublicationResult("exhausted", duration);
 				_logger.LogError(publicationException, "External publication for match {MatchId} stopped after {Attempt} attempts", item.MatchId, item.Attempt);
+			}
+			else
+			{
+				AppMetrics.RecordExternalPublicationResult("retrying", duration);
 			}
 		}
 

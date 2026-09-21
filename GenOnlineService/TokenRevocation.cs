@@ -79,7 +79,7 @@ namespace Database
 			}
 		}
 
-		public static async Task Upsert(AppDbContext db, Int64 userID, EUserSessionType sessionType, int tokenGeneration, string refreshJti, string previousRefreshJti, DateTime previousRefreshJtiExpires)
+		public static async Task<bool> Upsert(AppDbContext db, Int64 userID, EUserSessionType sessionType, int tokenGeneration, string refreshJti, string previousRefreshJti, DateTime previousRefreshJtiExpires)
 		{
 			try
 			{
@@ -94,10 +94,12 @@ namespace Database
 						previous_refresh_jti = VALUES(previous_refresh_jti),
 						previous_refresh_jti_expires = VALUES(previous_refresh_jti_expires),
 						updated = VALUES(updated)");
+				return true;
 			}
 			catch (Exception ex)
 			{
 				s_log.LogError(ex, "UserTokens.Upsert failed");
+				return false;
 			}
 		}
 
@@ -197,6 +199,7 @@ namespace GenOnlineService
 		{
 			if (String.IsNullOrEmpty(jti))
 			{
+				AppMetrics.RecordTokenOperation("validate_refresh", "missing_jti", sessionType);
 				return false;
 			}
 
@@ -204,25 +207,30 @@ namespace GenOnlineService
 			{
 				// No record yet (e.g. tokens issued before this feature shipped). Accept once so we
 				// don't force every live client to re-login; the refresh will then record its jti.
+				AppMetrics.RecordTokenOperation("validate_refresh", "legacy_accepted", sessionType);
 				return true;
 			}
 
 			// Same reason as above - a record that has never had a refresh jti recorded is permissive.
 			if (String.IsNullOrEmpty(state.RefreshJti))
 			{
+				AppMetrics.RecordTokenOperation("validate_refresh", "legacy_accepted", sessionType);
 				return true;
 			}
 
 			if (String.Equals(state.RefreshJti, jti, StringComparison.Ordinal))
 			{
+				AppMetrics.RecordTokenOperation("validate_refresh", "current", sessionType);
 				return true;
 			}
 
 			// The token this one replaced stays valid for a short window so an unacknowledged refresh
 			// can be retried instead of forcing a full re-login.
-			return !String.IsNullOrEmpty(state.PreviousRefreshJti)
+			bool acceptedDuringGrace = !String.IsNullOrEmpty(state.PreviousRefreshJti)
 				&& String.Equals(state.PreviousRefreshJti, jti, StringComparison.Ordinal)
 				&& DateTime.UtcNow < state.PreviousRefreshJtiExpires;
+			AppMetrics.RecordTokenOperation("validate_refresh", acceptedDuringGrace ? "grace" : "rejected", sessionType);
+			return acceptedDuringGrace;
 		}
 
 		public static async Task OnTokensIssued(Int64 userID, EUserSessionType sessionType, string refreshJti)
@@ -242,7 +250,8 @@ namespace GenOnlineService
 					PreviousRefreshJtiExpires = previousExpiry
 				});
 
-			await Persist(userID, sessionType, newState);
+			bool persisted = await Persist(userID, sessionType, newState);
+			AppMetrics.RecordTokenOperation("issue", persisted ? "success" : "persistence_error", sessionType);
 		}
 
 		// Invalidates every token previously issued to this user across all session types.
@@ -250,6 +259,7 @@ namespace GenOnlineService
 		{
 			s_log.LogInformation("Revoking all tokens for user {UserId} ({Reason})", userID, reason);
 
+			bool persisted = true;
 			foreach (EUserSessionType sessionType in s_allSessionTypes)
 			{
 				CachedState newState = s_state.AddOrUpdate(
@@ -257,9 +267,9 @@ namespace GenOnlineService
 					_ => new CachedState { Generation = 1, RefreshJti = String.Empty },
 					(_, existing) => new CachedState { Generation = existing.Generation + 1, RefreshJti = String.Empty });
 
-				await Persist(userID, sessionType, newState);
+				persisted &= await Persist(userID, sessionType, newState);
 			}
-
+			AppMetrics.RecordTokenOperation("revoke_all", persisted ? "success" : "persistence_error");
 		}
 
 		// Picks up bans applied directly in the database (there is no in-process ban API).
@@ -296,21 +306,22 @@ namespace GenOnlineService
 			}
 		}
 
-		private static async Task Persist(Int64 userID, EUserSessionType sessionType, CachedState state)
+		private static async Task<bool> Persist(Int64 userID, EUserSessionType sessionType, CachedState state)
 		{
 			if (s_dbFactory == null)
 			{
-				return;
+				return false;
 			}
 
 			try
 			{
 				await using AppDbContext db = await s_dbFactory.CreateDbContextAsync();
-				await Database.UserTokens.Upsert(db, userID, sessionType, state.Generation, state.RefreshJti, state.PreviousRefreshJti, state.PreviousRefreshJtiExpires);
+				return await Database.UserTokens.Upsert(db, userID, sessionType, state.Generation, state.RefreshJti, state.PreviousRefreshJti, state.PreviousRefreshJtiExpires);
 			}
 			catch (Exception ex)
 			{
 				s_log.LogError(ex, "TokenRevocation.Persist failed");
+				return false;
 			}
 		}
 
