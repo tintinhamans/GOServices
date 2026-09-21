@@ -377,6 +377,15 @@ namespace GenOnlineService
 		private static readonly ILogger s_log = AppLog.For(typeof(WebSocketManager));
 
 		public static int g_PeakConnectionCount = 0;
+
+		private static void RecordConnectionSnapshot()
+		{
+			foreach (var entry in m_dictWebsockets)
+			{
+				AppMetrics.RecordWebSocketConnections(entry.Key, entry.Value.Count);
+			}
+		}
+
 		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
 			string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
@@ -492,6 +501,7 @@ namespace GenOnlineService
 
 			UserWebSocketInstance newSess = new UserWebSocketInstance(sessionType, ownerID, userCacheData);
 			m_dictWebsockets[sessionType][ownerID] = newSess;
+			RecordConnectionSnapshot();
 
 			// update last login and last ip
 			await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
@@ -733,6 +743,8 @@ namespace GenOnlineService
 			{
 
 			}
+
+			RecordConnectionSnapshot();
 		}
 
 		/*
@@ -896,7 +908,12 @@ namespace GenOnlineService
 
 			}
 
-			return m_dictUserSessions[sessionType].Remove(userID, out var itemRemoved);
+			bool removed = m_dictUserSessions[sessionType].Remove(userID, out var itemRemoved);
+			if (removed && itemRemoved != null)
+			{
+				itemRemoved.ReleasePendingWebsocketSendAccounting();
+			}
+			return removed;
 		}
 
 
@@ -1193,6 +1210,7 @@ namespace GenOnlineService
 
 		// Matchmaking data
 		public UInt16 MatchmakingPlaylistID = 0;
+		public long MatchmakingStartedTimestamp = 0;
 		public ConcurrentList<int> MatchmakingMapIndicies = new();
 		internal bool IsRegisteredForMatchmaking { get; set; } = false;
 		internal SemaphoreSlim MatchmakingStateLock { get; } = new(1, 1);
@@ -1291,8 +1309,13 @@ namespace GenOnlineService
 				return;
 			}
 
-			if (!m_outbound.Writer.TryWrite(bytesJSON))
+			if (m_outbound.Writer.TryWrite(bytesJSON))
 			{
+				AppMetrics.AdjustWebSocketSendQueueDepth(1);
+			}
+			else
+			{
+				AppMetrics.RecordWebSocketFailure("outbound", "queue_full");
 				// too far behind to catch up: drop the connection so the client reconnects
 				if (WebSocketManager.GetWebSocketForSession(this)?.AbortIfOpen() == true)
 				{
@@ -1330,6 +1353,16 @@ namespace GenOnlineService
 		});
 
 		public ChannelReader<byte[]> OutboundWebsocketSends => m_outbound.Reader;
+
+		// the session is gone: take its unsent messages off the queue-depth gauge
+		public void ReleasePendingWebsocketSendAccounting()
+		{
+			int pending = m_outbound.Reader.Count;
+			if (pending > 0)
+			{
+				AppMetrics.AdjustWebSocketSendQueueDepth(-pending);
+			}
+		}
 
 		public bool NeedsCleanup()
 		{
@@ -1566,7 +1599,10 @@ namespace GenOnlineService
 							return;
 						}
 
-						outbound.TryRead(out _);
+						if (outbound.TryRead(out _))
+						{
+							AppMetrics.AdjustWebSocketSendQueueDepth(-1);
+						}
 					}
 				}
 			}
@@ -1595,11 +1631,13 @@ namespace GenOnlineService
 			}
 			catch (OperationCanceledException)
 			{
+				AppMetrics.RecordWebSocketFailure("outbound", "timeout");
 				s_log.LogWarning("Websocket send to user {UserId} stalled for {StallSeconds}s; connection aborted", m_UserID, c_SendStallTimeout.TotalSeconds);
 				return false;
 			}
 			catch
 			{
+				AppMetrics.RecordWebSocketFailure("outbound", "error");
 				return false;
 			}
 		}
