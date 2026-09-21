@@ -27,11 +27,19 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebSockets;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Sentry;
+using Sentry.OpenTelemetry;
 using System.Collections.Concurrent;
 using System.Configuration;
+using System.Diagnostics;
 using System.Drawing;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
@@ -275,6 +283,7 @@ namespace GenOnlineService
 	{
 		public static async Task Update(int numLobbies, int numPlayers)
 		{
+			AppMetrics.RecordServiceSnapshot(numLobbies, numPlayers);
 			int hourOfDay = DateTime.Now.Hour;
 			// store stats
 
@@ -710,7 +719,7 @@ namespace GenOnlineService
 
 				// TODO_EFCORE: Consider use of ExecuteDeleteAsync and options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 				// TODO_EFCORE: Move to AddPooledDbContextFactory instead and use private readonly IDbContextFactory<AppDbContext> _factory;
-				builder.Services.AddPooledDbContextFactory<AppDbContext>(options =>
+				builder.Services.AddPooledDbContextFactory<AppDbContext>((serviceProvider, options) =>
 				{
 					options.UseMySql(
 						csb.ConnectionString,
@@ -718,8 +727,15 @@ namespace GenOnlineService
 
 					options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 
+					// command events carry SQL text; ignoring them here holds whatever the logging configuration says
+					options.ConfigureWarnings(warnings => warnings.Ignore(
+						RelationalEventId.CommandExecuting,
+						RelationalEventId.CommandExecuted,
+						RelationalEventId.CommandError,
+						RelationalEventId.CommandCanceled));
+					options.AddInterceptors(serviceProvider.GetRequiredService<SlowDatabaseCommandInterceptor>());
+
 #if RELEASE
-					options.UseLoggerFactory(LoggerFactory.Create(builder => { })); // Empty logger
 					options.EnableSensitiveDataLogging(false); // Ensure sensitive data is not logged
 					options.EnableDetailedErrors(false);      // Disable detailed error messages
 #endif
@@ -1158,6 +1174,31 @@ namespace GenOnlineService
 				new PathString($"/env/{Uri.EscapeDataString(environment)}/contract/{Uri.EscapeDataString(contractVersion)}/ws"));
 		}
 
+		private static async Task RunObservedBackgroundJobAsync(
+			string jobName,
+			ILogger logger,
+			Func<Task> operation)
+		{
+			bool succeeded = true;
+			using Activity? activity = AppMetrics.StartActivity(
+				$"background.{jobName}",
+				ActivityKind.Internal,
+				new KeyValuePair<string, object?>("job.name", jobName));
+
+			try
+			{
+				await operation();
+			}
+			catch (Exception ex)
+			{
+				succeeded = false;
+				AppMetrics.RecordException(activity, ex);
+				logger.LogError(ex, "Background job {JobName} failed", jobName);
+			}
+
+			AppMetrics.RecordBackgroundJob(jobName, succeeded);
+		}
+
 		public static async Task Main(string[] args)
 		{
 #if !DEBUG
@@ -1168,6 +1209,61 @@ namespace GenOnlineService
 			ThreadPool.SetMinThreads(200, 200);
 
 			var builder = WebApplication.CreateBuilder(args);
+			builder.Services.AddSingleton<SlowDatabaseCommandInterceptor>();
+			bool enableOpenTelemetry = builder.Configuration.GetValue<bool>("OpenTelemetry:Enabled");
+			bool enableSentry = builder.Configuration.GetValue<bool>("Sentry:enabled");
+			bool enableSentryOpenTelemetry = enableOpenTelemetry && enableSentry;
+			if (enableOpenTelemetry)
+			{
+				string? openTelemetryEndpoint = builder.Configuration["OpenTelemetry:OtlpEndpoint"];
+				string openTelemetryServiceName = builder.Configuration["OpenTelemetry:ServiceName"] ?? AppMetrics.MeterName;
+				double traceSampleRatio = builder.Configuration.GetValue<double?>("OpenTelemetry:TraceSampleRatio") ?? 1.0;
+				if (traceSampleRatio < 0 || traceSampleRatio > 1)
+				{
+					throw new InvalidOperationException("OpenTelemetry:TraceSampleRatio must be between 0 and 1.");
+				}
+
+				void ConfigureOtlpExporter(OtlpExporterOptions options)
+				{
+					if (!String.IsNullOrWhiteSpace(openTelemetryEndpoint))
+					{
+						options.Endpoint = new Uri(openTelemetryEndpoint);
+					}
+				}
+
+				builder.Services.AddOpenTelemetry()
+					.ConfigureResource(resource => resource.AddService(openTelemetryServiceName))
+					.WithMetrics(metrics =>
+					{
+						metrics.AddMeter(AppMetrics.MeterName);
+						metrics.AddMeter(AppMetrics.MySqlMeterName);
+						metrics.AddAspNetCoreInstrumentation();
+						metrics.AddHttpClientInstrumentation();
+						metrics.AddRuntimeInstrumentation();
+						metrics.AddOtlpExporter(ConfigureOtlpExporter);
+					})
+					.WithTracing(tracing =>
+					{
+						tracing.SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(traceSampleRatio)));
+						tracing.AddAspNetCoreInstrumentation(options => options.RecordException = true);
+						tracing.AddHttpClientInstrumentation(options => options.RecordException = true);
+						tracing.AddSource(AppMetrics.ActivitySourceName);
+						tracing.AddSource(AppMetrics.MySqlActivitySourceName);
+						// before Sentry and the exporter, so neither sees unredacted spans
+						tracing.AddProcessor(new TelemetryRedactionProcessor());
+						if (enableSentryOpenTelemetry)
+						{
+							tracing.AddSentry();
+						}
+						tracing.AddOtlpExporter(ConfigureOtlpExporter);
+					})
+					.WithLogging(logging => logging.AddOtlpExporter(ConfigureOtlpExporter), options =>
+					{
+						options.IncludeFormattedMessage = true;
+						options.IncludeScopes = true;
+						options.ParseStateValues = true;
+					});
+			}
 			RoomCatalog.Initialize(Path.Combine(builder.Environment.ContentRootPath, "data", "rooms.json"));
 
 			// Add services to the container.
@@ -1208,30 +1304,30 @@ namespace GenOnlineService
 
 			if ((bool)sentry_enabled)
 			{
-				// init sentry
+				double sentryTracesSampleRate = sentrySettings.GetValue<double?>("traces_sample_rate") ?? 0.1;
+				bool sentryEnableLogs = sentrySettings.GetValue<bool?>("enable_logs") ?? false;
+
 				SentrySdk.Init(options =>
 				{
-					// A Sentry Data Source Name (DSN) is required.
-					// See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
-					// You can set it in the SENTRY_DSN environment variable, or you can set it in code here.
 					options.Dsn = sentry_dsn;
 
-					// When debug is enabled, the Sentry client will emit detailed debugging information to the console.
-					// This might be helpful, or might interfere with the normal operation of your application.
-					// We enable it here for demonstration purposes when first trying Sentry.
-					// You shouldn't do this in your applications unless you're troubleshooting issues with Sentry.
 					options.Debug = false;
 
-					// This option is recommended. It enables Sentry's "Release Health" feature.
 					options.AutoSessionTracking = true;
 
 					options.Environment = sentry_env;
 
 					options.Release = "generalsonline-services@082826";
+					options.EnableLogs = sentryEnableLogs;
+					// Sentry's own EF/SqlClient listener would put SQL into span descriptions
+					options.DisableDiagnosticSourceIntegration();
+					if (enableSentryOpenTelemetry)
+					{
+						options.TracesSampleRate = sentryTracesSampleRate;
+						options.UseOpenTelemetry(disableSentryTracing: true);
+					}
 				});
 
-				// Bridge ILogger into Sentry: Warning+ ride along as breadcrumbs, Error+ are captured as events.
-				// InitializeSdk is false because we already initialized the SDK above with our own config.
 				builder.Logging.AddSentry(options =>
 				{
 					options.InitializeSdk = false;
@@ -1261,6 +1357,11 @@ namespace GenOnlineService
 			{
 				builder.Services.AddRateLimiter(options =>
 				{
+					options.OnRejected = (context, cancellationToken) =>
+					{
+						AppMetrics.RecordSecurityAction("http_rate_limit", "rejected");
+						return ValueTask.CompletedTask;
+					};
 					options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
 					{
 						// Use authenticated user ID or fallback to IP address
@@ -1629,24 +1730,21 @@ namespace GenOnlineService
 			{
 				try
 				{
-					await WebSocketManager.CheckForTimeouts();
-
-					var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-
-					int numLobbies = lobbyManager.GetNumLobbies();
-					await StatsTracker.Update(numLobbies, WebSocketManager.GetNumberOfUsersOnline());
-
-					await lobbyManager.Cleanup();
-
-					int expiredLoginCount = PendingLoginManager.CleanupExpiredLogins();
-					if (expiredLoginCount > 0)
+					await RunObservedBackgroundJobAsync("service_cleanup", app.Logger, async () =>
 					{
-						app.Logger.LogDebug("Removed {ExpiredLoginCount} expired pending logins", expiredLoginCount);
-					}
-				}
-				catch (Exception ex)
-				{
-					app.Logger.LogError(ex, "Cleanup timer failed");
+						await WebSocketManager.CheckForTimeouts();
+
+						var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
+						int numLobbies = lobbyManager.GetNumLobbies();
+						await StatsTracker.Update(numLobbies, WebSocketManager.GetNumberOfUsersOnline());
+						await lobbyManager.Cleanup();
+
+						int expiredLoginCount = PendingLoginManager.CleanupExpiredLogins();
+						if (expiredLoginCount > 0)
+						{
+							app.Logger.LogDebug("Removed {ExpiredLoginCount} expired pending logins", expiredLoginCount);
+						}
+					});
 				}
 				finally
 				{
@@ -1755,16 +1853,13 @@ namespace GenOnlineService
 				{
 					try
 					{
-						using (var scope = app.Services.CreateScope())
+						await RunObservedBackgroundJobAsync("daily_stats_save", app.Logger, async () =>
 						{
+							using var scope = app.Services.CreateScope();
 							var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
 							await using var db = await factory.CreateDbContextAsync();
 							await DailyStatsManager.SaveToDB(db);
-						}
-					}
-					catch (Exception ex)
-					{
-						app.Logger.LogError(ex, "Daily-stats timer failed");
+						});
 					}
 					finally
 					{
@@ -1782,16 +1877,13 @@ namespace GenOnlineService
 				{
 					try
 					{
-						using (var scope = app.Services.CreateScope())
+						await RunObservedBackgroundJobAsync("token_revocation_reconcile", app.Logger, async () =>
 						{
+							using var scope = app.Services.CreateScope();
 							var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
 							await using var db = await factory.CreateDbContextAsync();
 							await TokenRevocationManager.ReconcileBans(db);
-						}
-					}
-					catch (Exception ex)
-					{
-						app.Logger.LogError(ex, "Token-revocation timer failed");
+						});
 					}
 					finally
 					{
