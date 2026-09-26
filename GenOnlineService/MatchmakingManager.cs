@@ -867,6 +867,18 @@ static class MatchmakingManager
 			m_lstMembers.Add(new MatchmakingBucketMember(owningSession));
 		}
 
+		// Test-only seams for exercising VerifyMatchIsStillValid without the full Tick()/DB-backed
+		// registration flow.
+		internal void AddMemberForTests(UserSession session)
+		{
+			m_lstMembers.Add(new MatchmakingBucketMember(session));
+		}
+
+		internal void SetMatchFormedSizeForTests(int size)
+		{
+			m_MatchFormedSize = size;
+		}
+
 		public Int64 GetLobbyID()
 		{
 			return m_LobbyID;
@@ -875,6 +887,11 @@ static class MatchmakingManager
 		Int64 m_LobbyID = -1;
 		Int64 m_StartTime = -1;
 		Int64 m_timeStartedWaitingOnLobbyJoins = -1;
+
+		// The number of players the match was actually formed with, captured the moment the lobby is
+		// created. The pre-start re-verification requires the lobby to still hold exactly this many
+		// human members - not just "at least DesiredPlayers" - before ever sending START_GAME.
+		int m_MatchFormedSize = -1;
 
 		// how long we give everyone to actually connect to the QuickMatch lobby before we give up on the stragglers
 		private const Int64 c_LobbyJoinTimeoutMSec = 45000;
@@ -947,6 +964,69 @@ static class MatchmakingManager
 					await SendMatchmakingMessage(memberSession, "Preparing match...");
 				}
 			}
+		}
+
+		// Re-verifies, right before starting the countdown and right before actually sending
+		// START_GAME, that the match this bucket formed is still exactly what is about to start:
+		// same players, all still live, and the mesh check that passed is still valid for the
+		// CURRENT membership. All reads here are simple property/collection reads (no mutation), and
+		// Lobby's own gate already makes every membership mutation atomic, so this is a
+		// consistent-enough final sanity check without needing to go through that gate itself.
+		// Internal (not private) so this - the actual gate that would block START_GAME for a lobby
+		// leave, an abandoned session, or a stale mesh-check outcome - is directly unit-testable
+		// without driving the full Tick() state machine (which needs a live DB for CreateLobby).
+		internal bool VerifyMatchIsStillValid(Lobby lobby, out string failureReason)
+		{
+			List<LobbyMember> humanMembers = lobby.Members.Where(m => m.IsHuman()).ToList();
+
+			if (humanMembers.Count != m_MatchFormedSize)
+			{
+				failureReason = "the lobby no longer holds the number of players the match was formed with";
+				return false;
+			}
+
+			HashSet<Int64> lobbyUserIDs = humanMembers.Select(m => m.UserID).ToHashSet();
+
+			// ConcurrentList<T> doesn't implement IEnumerable<T>, so a plain loop instead of LINQ.
+			HashSet<Int64> bucketUserIDs = new();
+			foreach (MatchmakingBucketMember bucketMember in m_lstMembers)
+			{
+				UserSession? bucketMemberSession = bucketMember.GetAssociatedSession();
+				if (bucketMemberSession != null)
+				{
+					bucketUserIDs.Add(bucketMemberSession.m_UserID);
+				}
+			}
+
+			if (!lobbyUserIDs.SetEquals(bucketUserIDs))
+			{
+				failureReason = "the lobby's players no longer match the players the match was formed with";
+				return false;
+			}
+
+			foreach (LobbyMember member in humanMembers)
+			{
+				if (!member.GetSession().TryGetTarget(out UserSession? session) || session == null || session.IsAbandoned())
+				{
+					failureReason = $"user {member.UserID}'s connection is no longer live";
+					return false;
+				}
+			}
+
+			if (lobby.MembershipVersion != lobby.MembershipVersionAtLastCheckStart)
+			{
+				failureReason = "lobby membership changed after the connectivity check";
+				return false;
+			}
+
+			if (lobby.LastFullMeshConnectivityCheckOutcome != true)
+			{
+				failureReason = "the last connectivity check did not report everyone connected";
+				return false;
+			}
+
+			failureReason = string.Empty;
+			return true;
 		}
 
 		private async Task AbortQuickMatchAutoStart(string reason)
@@ -1076,6 +1156,8 @@ static class MatchmakingManager
 
 					if (!lobbyDuringMeshCheck.PendingFullMeshConnectivityChecks)
 					{
+						bool bMatchStillValid = VerifyMatchIsStillValid(lobbyDuringMeshCheck, out string verifyFailureReason);
+
 						bool bStartCountdown;
 						bool bAbortStart;
 						bool bInvalidatedAtDecision;
@@ -1090,7 +1172,7 @@ static class MatchmakingManager
 							else
 							{
 								m_bWaitingOnMeshConnectivityChecks = false;
-								bStartCountdown = !bInvalidatedAtDecision && lobbyDuringMeshCheck.LastFullMeshConnectivityCheckOutcome == true;
+								bStartCountdown = !bInvalidatedAtDecision && bMatchStillValid;
 								bAbortStart = !bStartCountdown;
 								if (bStartCountdown)
 								{
@@ -1116,7 +1198,9 @@ static class MatchmakingManager
 						{
 							string reason = bInvalidatedAtDecision
 								? "QuickMatch auto-start was aborted because a player left during match setup."
-								: "QuickMatch auto-start was aborted because not all players were fully mesh-connected.";
+								: !bMatchStillValid
+									? $"QuickMatch auto-start was aborted because the match is no longer valid: {verifyFailureReason}."
+									: "QuickMatch auto-start was aborted because not all players were fully mesh-connected.";
 							await AbortQuickMatchAutoStart(reason);
 						}
 					}
@@ -1138,6 +1222,8 @@ static class MatchmakingManager
 						return;
 					}
 
+					bool bMatchStillValidAtStart = VerifyMatchIsStillValid(lobbyAfterCountdown, out string startVerifyFailureReason);
+
 					bool bStartGame;
 					bool bAbortStart;
 					lock (m_StateLock)
@@ -1151,7 +1237,7 @@ static class MatchmakingManager
 						{
 							m_bHasStartedCountdown = false;
 							m_StartTime = -1;
-							bStartGame = !m_bAutoStartInvalidated;
+							bStartGame = !m_bAutoStartInvalidated && bMatchStillValidAtStart;
 							bAbortStart = !bStartGame;
 							if (bStartGame)
 							{
@@ -1167,7 +1253,10 @@ static class MatchmakingManager
 					}
 					else if (bAbortStart)
 					{
-						await AbortQuickMatchAutoStart("QuickMatch auto-start was aborted because a player left during match setup.");
+						string abortReason = !bMatchStillValidAtStart
+							? $"QuickMatch auto-start was aborted because the match is no longer valid: {startVerifyFailureReason}."
+							: "QuickMatch auto-start was aborted because a player left during match setup.";
+						await AbortQuickMatchAutoStart(abortReason);
 					}
 
 					return;
@@ -1280,6 +1369,10 @@ static class MatchmakingManager
 								using var scope = ServiceLocator.Services.CreateScope();
 								var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
 								await using var db = await factory.CreateDbContextAsync();
+
+								// Record the exact number the match was formed with - the pre-start
+								// re-verification checks the lobby against this, not just "at least DesiredPlayers".
+								m_MatchFormedSize = CurrentMemberCount();
 
 								m_LobbyID = await lobbyManager.CreateLobby(db, dummyHostUser, dummyHostUserData.m_strDisplayName, "Quickmatch Lobby", strMapName, strMapPath + ".map",
 										true, playlist.DesiredPlayers, "", 12345, false, true, 10000, false, String.Empty, -5, false, Constants.g_DefaultCameraMaxHeight, dummyHostUser.ExeCRC, dummyHostUser.IniCRC, ELobbyType.QuickMatch,
