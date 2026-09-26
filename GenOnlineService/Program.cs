@@ -1614,6 +1614,7 @@ namespace GenOnlineService
 
 			app.MapControllers();
 
+			MatchmakingManager.ValidatePlaylistsAtStartup();
 
 			// cleanup
 			System.Timers.Timer timerCleanup = new System.Timers.Timer(5000); // 5s tick
