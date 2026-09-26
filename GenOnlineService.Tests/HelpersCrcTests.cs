@@ -25,8 +25,8 @@ public class HelpersCrcTests
 
 		Helpers.RegisterInitialPlayerCRCsFromLoginPayload(userID, data);
 
-		Assert.True(Helpers.g_dictInitialExeCRCs.TryGetValue(userID, out string? acHash));
-		Assert.Equal("ABCDEF0123456789", acHash);
+		Assert.True(Helpers.g_dictInitialExeCRCs.TryGetValue(userID, out var acEntry));
+		Assert.Equal("ABCDEF0123456789", acEntry.ExeCrcHash);
 		Assert.False(Helpers.g_dictInitialGameCRCs.ContainsKey(userID));
 	}
 
@@ -39,10 +39,10 @@ public class HelpersCrcTests
 
 		Helpers.RegisterInitialPlayerCRCsFromLoginPayload(userID, data);
 
-		Assert.True(Helpers.g_dictInitialExeCRCs.TryGetValue(userID, out string? acHash));
-		Assert.Equal("FEDCBA9876543210", acHash);
+		Assert.True(Helpers.g_dictInitialExeCRCs.TryGetValue(userID, out var acEntry));
+		Assert.Equal("FEDCBA9876543210", acEntry.ExeCrcHash);
 
-		Assert.True(Helpers.g_dictInitialGameCRCs.TryGetValue(userID, out (UInt32 ExeCRC, UInt32 IniCRC) gameCRCs));
+		Assert.True(Helpers.g_dictInitialGameCRCs.TryGetValue(userID, out var gameCRCs));
 		Assert.Equal(12345u, gameCRCs.ExeCRC);
 		Assert.Equal(67890u, gameCRCs.IniCRC);
 	}
@@ -56,7 +56,7 @@ public class HelpersCrcTests
 
 		Helpers.RegisterInitialPlayerCRCsFromLoginPayload(userID, data);
 
-		Assert.True(Helpers.g_dictInitialGameCRCs.TryGetValue(userID, out (UInt32 ExeCRC, UInt32 IniCRC) gameCRCs));
+		Assert.True(Helpers.g_dictInitialGameCRCs.TryGetValue(userID, out var gameCRCs));
 		Assert.Equal(12345u, gameCRCs.ExeCRC);
 		Assert.Equal(67890u, gameCRCs.IniCRC);
 	}

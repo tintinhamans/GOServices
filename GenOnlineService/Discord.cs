@@ -56,19 +56,53 @@ public enum DiscordCommandParsingFlags
 
 public static class Helpers
 {
-	public static ConcurrentDictionary<Int64, string> g_dictInitialExeCRCs = new();
+	// A user who logs in but never opens a websocket (dropped connection, abandoned launcher, ...)
+	// would otherwise leak an entry here forever. RegisteredAtTicks (Environment.TickCount64) lets
+	// PruneExpiredLoginCRCs remove anything nobody ever consumed within c_LoginCrcEntryExpiryMS.
+	internal const Int64 c_LoginCrcEntryExpiryMS = 10 * 60 * 1000; // 10 minutes
+
+	public static ConcurrentDictionary<Int64, (string ExeCrcHash, Int64 RegisteredAtTicks)> g_dictInitialExeCRCs = new();
 	public static void RegisterInitialPlayerExeCRC(Int64 user_id, string exe_crc)
 	{
-		g_dictInitialExeCRCs[user_id] = exe_crc;
+		g_dictInitialExeCRCs[user_id] = (exe_crc, Environment.TickCount64);
 	}
 
 	// Handoff for the UInt32 game CRCs (the same ExeCRC/IniCRC meaning as lobby create/matchmaking
 	// bodies), separate from the AC .text-section hash above. Set at login, consumed once by
 	// UserSession's constructor when the websocket session is actually created.
-	public static ConcurrentDictionary<Int64, (UInt32 ExeCRC, UInt32 IniCRC)> g_dictInitialGameCRCs = new();
+	public static ConcurrentDictionary<Int64, (UInt32 ExeCRC, UInt32 IniCRC, Int64 RegisteredAtTicks)> g_dictInitialGameCRCs = new();
 	public static void RegisterInitialPlayerGameCRCs(Int64 user_id, UInt32 exeCrc, UInt32 iniCrc)
 	{
-		g_dictInitialGameCRCs[user_id] = (exeCrc, iniCrc);
+		g_dictInitialGameCRCs[user_id] = (exeCrc, iniCrc, Environment.TickCount64);
+	}
+
+	// Pure so the expiry boundary is unit-testable without touching the static dictionaries.
+	internal static bool IsLoginCrcEntryExpired(Int64 registeredAtTicks, Int64 nowTicks)
+	{
+		return nowTicks - registeredAtTicks >= c_LoginCrcEntryExpiryMS;
+	}
+
+	// Called from the existing 5s WebSocketManager.CheckForTimeouts sweep (Program.cs's
+	// timerCleanup), so entries for users who log in but never open a websocket don't leak forever.
+	public static void PruneExpiredLoginCRCs()
+	{
+		Int64 nowTicks = Environment.TickCount64;
+
+		foreach (var kvPair in g_dictInitialExeCRCs)
+		{
+			if (IsLoginCrcEntryExpired(kvPair.Value.RegisteredAtTicks, nowTicks))
+			{
+				g_dictInitialExeCRCs.TryRemove(kvPair.Key, out _);
+			}
+		}
+
+		foreach (var kvPair in g_dictInitialGameCRCs)
+		{
+			if (IsLoginCrcEntryExpired(kvPair.Value.RegisteredAtTicks, nowTicks))
+			{
+				g_dictInitialGameCRCs.TryRemove(kvPair.Key, out _);
+			}
+		}
 	}
 
 	// exe_crc/ini_crc may arrive as a JSON number or a numeric string depending on the client;
