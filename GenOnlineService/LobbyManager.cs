@@ -224,6 +224,13 @@ namespace GenOnlineService
 			await Database.AntiCheat.FlagAccountForReview_SuspectProbes(db, userID, MatchID, "Malformed probe response (Type 2)");
 		}
 
+		// Test-only accessors for the probe counters above; internal (not private) via
+		// InternalsVisibleTo so concurrency tests can assert on them without a public API surface.
+		internal int GetProbeSentCount_Type1ForTests(Int64 userID) => m_dictProbe1_Sent.TryGetValue(userID, out int count) ? count : 0;
+		internal int GetProbeSentCount_Type2ForTests(Int64 userID) => m_dictProbe2_Sent.TryGetValue(userID, out int count) ? count : 0;
+		internal int GetProbeReceivedCount_Type1ForTests(Int64 userID) => m_dictProbe1_Received.TryGetValue(userID, out int count) ? count : 0;
+		internal int GetProbeReceivedCount_Type2ForTests(Int64 userID) => m_dictProbe2_Received.TryGetValue(userID, out int count) ? count : 0;
+
 		// End AC Probes
 		public async Task StartFullMeshConnectivityCheck()
 		{
