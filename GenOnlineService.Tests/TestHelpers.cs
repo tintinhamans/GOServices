@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using GenOnlineService;
+using Microsoft.Extensions.Configuration;
 
 namespace GenOnlineService.Tests;
 
@@ -14,6 +15,31 @@ internal static class TestHelpers
 	internal static void InitializeRoomCatalogForTests()
 	{
 		RoomCatalog.InitializeFromJsonForTests("""[{"name":"Global","default":false,"rooms":[]}]""");
+	}
+
+	// Mesh-check tests need a bounded, near-instant attempt window instead of the real 8s default.
+	// FullMeshCheckSettings.Get falls back to its default for any value <= 0, so 1ms (plus a short
+	// sleep in the tests themselves) is used rather than 0.
+	[ModuleInitializer]
+	internal static void InitializeMeshCheckSettingsForTests()
+	{
+		Program.g_Config = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["Core:full_mesh_check_attempt_window_ms"] = "1",
+				["Core:full_mesh_check_snapshot_interval_ms"] = "1",
+				["Core:full_mesh_check_retry_delay_ms"] = "1",
+				["Core:full_mesh_check_max_attempts"] = "1",
+			})
+			.Build();
+	}
+
+	// Registers a session in the same process-wide registry Lobby.CompleteFullMeshConnectivityCheckLocked
+	// looks the host up in (WebSocketManager.GetSessionFromUser), so mesh-check tests can observe the
+	// outcome message queued onto that session's outbound channel.
+	public static void RegisterSessionForTests(UserSession session)
+	{
+		WebSocketManager.GetUserDataCache()[EUserSessionType.GameClient][session.m_UserID] = session;
 	}
 
 	private static Int64 s_NextUserID = 1;

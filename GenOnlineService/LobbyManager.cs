@@ -62,6 +62,27 @@ namespace GenOnlineService
 		}
 	}
 
+	// The set of "reason" values FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST can carry.
+	// Empty string ("") always means mesh_complete was true; every other outcome sets exactly one
+	// of these:
+	//  - MissingConnections: the check ran to completion (attempts exhausted) with at least one
+	//    real peer-to-peer connection still missing between members who are still in the lobby.
+	//  - Timeout: the final attempt's window elapsed without a single member ever reporting a
+	//    connectivity snapshot, so nothing could be judged connected.
+	//  - MemberLeft: a member left the lobby while this check was pending, so the outcome may be
+	//    explained by that departure rather than a real connectivity failure.
+	//  - CheckSuperseded: a new check was started (StartFullMeshConnectivityCheck) before this one
+	//    finished. The server guarantees a COMPLETE_TO_HOST for every check it starts, so the
+	//    superseded check is completed with this reason before the new one begins.
+	internal static class FullMeshCheckOutcomeReason
+	{
+		internal const string None = "";
+		internal const string MissingConnections = "missing_connections";
+		internal const string Timeout = "timeout";
+		internal const string MemberLeft = "member_left";
+		internal const string CheckSuperseded = "check_superseded";
+	}
+
 	// Core:full_mesh_check_* in appsettings.json, read on use
 	internal static class FullMeshCheckSettings
 	{
@@ -166,6 +187,12 @@ namespace GenOnlineService
 		[JsonIgnore]
 		private bool m_bCurrentAttemptHasLegacyResponse = false;
 
+		// Set while a check is pending if a member leaves the lobby before it completes, so the
+		// eventual outcome can report FullMeshCheckOutcomeReason.MemberLeft instead of a generic
+		// connectivity failure. Reset each time a new check starts.
+		[JsonIgnore]
+		private bool m_bMemberLeftDuringCurrentCheck = false;
+
 		private static Int64 s_NextFullMeshCheckID = 0;
 
 		// Backing counter for LobbyMember.JoinSequence: per-lobby, starts at 1, only ever assigned
@@ -241,10 +268,22 @@ namespace GenOnlineService
 		{
 			await RunExclusiveAsync(() =>
 			{
+				if (PendingFullMeshConnectivityChecks)
+				{
+					// A new check preempts whatever was still in flight. The previous check already told
+					// clients to start reporting, so without this it would never get its own
+					// COMPLETE_TO_HOST - breaking the "every started check completes" guarantee.
+					CompleteFullMeshConnectivityCheckLocked(
+						bMeshComplete: false,
+						lstMissingConnections: new List<MissingConnectionEntry>(),
+						reason: FullMeshCheckOutcomeReason.CheckSuperseded);
+				}
+
 				FullMeshCheckID = Interlocked.Increment(ref s_NextFullMeshCheckID);
 				FullMeshCheckAttempt = 1;
 				m_TimeToRetryFullMeshChecks = -1;
 				LastFullMeshConnectivityCheckOutcome = null;
+				m_bMemberLeftDuringCurrentCheck = false;
 				BeginFullMeshConnectivityCheckAttempt();
 				return Task.CompletedTask;
 			});
@@ -519,39 +558,61 @@ namespace GenOnlineService
 					}
 
 					// inform host that we are done
-					// start full mesh connectivity checks
-					WebSocketMessage_FullMeshConnectivityCheckOutcome outcome = new WebSocketMessage_FullMeshConnectivityCheckOutcome();
-					outcome.msg_id = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST;
+					bool bMeshCompleteFinal = bDisableMeshCheck || lstMissingConnections.Count == 0;
+					List<MissingConnectionEntry> lstFinalMissingConnections = bDisableMeshCheck
+						? new List<MissingConnectionEntry>()
+						: lstMissingConnections;
 
-					if (bDisableMeshCheck)
+					string reason;
+					if (bMeshCompleteFinal)
 					{
-						outcome.mesh_complete = true;
-						outcome.missing_connections = new List<MissingConnectionEntry>();
+						reason = FullMeshCheckOutcomeReason.None;
+					}
+					else if (m_bMemberLeftDuringCurrentCheck)
+					{
+						reason = FullMeshCheckOutcomeReason.MemberLeft;
+					}
+					else if (FullMeshConnectivityChecks.IsEmpty)
+					{
+						// nobody ever reported a snapshot for this attempt, so nothing could be judged connected
+						reason = FullMeshCheckOutcomeReason.Timeout;
 					}
 					else
 					{
-						outcome.mesh_complete = lstMissingConnections.Count == 0;
-						outcome.missing_connections = lstMissingConnections;
+						reason = FullMeshCheckOutcomeReason.MissingConnections;
 					}
 
-					LastFullMeshConnectivityCheckOutcome = outcome.mesh_complete;
-
-					// TODO_EFCORE: Later, these should really use lobby list instead of getting session from ID
-
-					// send to host
-					UserSession? hostSession = WebSocketManager.GetSessionFromUser(Owner, EUserSessionType.GameClient); // host should be a game client
-					if (hostSession != null)
-					{
-						byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outcome));
-						hostSession.QueueWebsocketSend(bytesJSON);
-					}
-
-					// reset state
-					PendingFullMeshConnectivityChecks = false;
-					TimeStartFullMeshChecks = -1;
-					m_TimeToRetryFullMeshChecks = -1;
+					CompleteFullMeshConnectivityCheckLocked(bMeshCompleteFinal, lstFinalMissingConnections, reason);
 				}
 			}
+		}
+
+		// Sends FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST to the host and resets the
+		// pending-check state. Must only be called while holding m_LobbyGate.
+		private void CompleteFullMeshConnectivityCheckLocked(bool bMeshComplete, List<MissingConnectionEntry> lstMissingConnections, string reason)
+		{
+			WebSocketMessage_FullMeshConnectivityCheckOutcome outcome = new WebSocketMessage_FullMeshConnectivityCheckOutcome();
+			outcome.msg_id = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST;
+			outcome.mesh_complete = bMeshComplete;
+			outcome.missing_connections = lstMissingConnections;
+			outcome.reason = bMeshComplete ? FullMeshCheckOutcomeReason.None : reason;
+
+			LastFullMeshConnectivityCheckOutcome = outcome.mesh_complete;
+
+			// TODO_EFCORE: Later, these should really use lobby list instead of getting session from ID
+
+			// send to host
+			UserSession? hostSession = WebSocketManager.GetSessionFromUser(Owner, EUserSessionType.GameClient); // host should be a game client
+			if (hostSession != null)
+			{
+				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outcome));
+				hostSession.QueueWebsocketSend(bytesJSON);
+			}
+
+			// reset state
+			PendingFullMeshConnectivityChecks = false;
+			TimeStartFullMeshChecks = -1;
+			m_TimeToRetryFullMeshChecks = -1;
 		}
 
 		public void AddPassword(string password)
@@ -840,6 +901,13 @@ namespace GenOnlineService
 		{
 			// NOTE: By the time this is called, the member is no longer in the members list
 			bool bNeedsHostMigrate = Owner == leavingUserID;
+
+			// A departure while a mesh check is pending can explain that check's eventual failure,
+			// so the outcome can say why instead of reporting a generic connectivity failure.
+			if (PendingFullMeshConnectivityChecks)
+			{
+				m_bMemberLeftDuringCurrentCheck = true;
+			}
 
 			// we need human members, not real members
 			int numHumanMembers = GetNumberOfHumans();
