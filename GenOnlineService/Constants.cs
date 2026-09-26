@@ -665,6 +665,11 @@ namespace GenOnlineService
 				{
 					sourceData.MarkAbandoned();
 
+					// A quick match must never start believing this player is still connected. If
+					// they're in a QuickMatch lobby that's mid setup/countdown, invalidate its bucket's
+					// auto-start the same way a lobby-level leave would.
+					MatchmakingManager.InvalidateAutoStartForLobby(sourceData.currentLobbyID);
+
 					// If the player was in an active game when their connection dropped, record the
 					// abandon time NOW (before any lobby-structure cleanup runs).  This timestamp is
 					// the authoritative "who quit first" signal used by DetermineLobbyWinnerIfNotPresent,

@@ -133,6 +133,19 @@ namespace GenOnlineService
 		[JsonIgnore]
 		public Int64 TimeStartFullMeshChecks { get; private set; } = -1;
 
+		// Incremented under m_LobbyGate every time a human member is added or removed. A quick match
+		// must never start on the strength of a mesh check that passed for a different set of
+		// players than the lobby currently holds, so this - plus MembershipVersionAtLastCheckStart -
+		// lets the check outcome be tied to the exact membership it was run against. Any membership
+		// change also clears LastFullMeshConnectivityCheckOutcome outright, as a second, simpler line
+		// of defense.
+		[JsonIgnore]
+		public int MembershipVersion { get; private set; } = 0;
+
+		// MembershipVersion as of the moment the current/most recently started check began.
+		[JsonIgnore]
+		public int MembershipVersionAtLastCheckStart { get; private set; } = -1;
+
 		// Single per-lobby exclusive gate for every mutation of this lobby's Members/Owner, slot
 		// state/fields, ready state, and mesh-check state. Everything that used to be split across
 		// g_SlotLock (slots) and m_FullMeshCheckLock (mesh-check fields) now goes through this one
@@ -335,6 +348,7 @@ namespace GenOnlineService
 				m_TimeToRetryFullMeshChecks = -1;
 				LastFullMeshConnectivityCheckOutcome = null;
 				m_bMemberLeftDuringCurrentCheck = false;
+				MembershipVersionAtLastCheckStart = MembershipVersion;
 				// Both real callers only ever start a check while they are the current owner (the
 				// websocket handler checks this explicitly; quickmatch's dummy host is set as Owner at
 				// lobby creation), so Owner at this instant is the requester the eventual outcome
@@ -624,7 +638,8 @@ namespace GenOnlineService
 					}
 
 					// inform host that we are done
-					bool bMeshCompleteFinal = bDisableMeshCheck || lstMissingConnections.Count == 0;
+					bool bMembershipChangedDuringCheck = MembershipVersion != MembershipVersionAtLastCheckStart;
+					bool bMeshCompleteFinal = !bMembershipChangedDuringCheck && (bDisableMeshCheck || lstMissingConnections.Count == 0);
 					List<MissingConnectionEntry> lstFinalMissingConnections = bDisableMeshCheck
 						? new List<MissingConnectionEntry>()
 						: lstMissingConnections;
@@ -634,8 +649,10 @@ namespace GenOnlineService
 					{
 						reason = FullMeshCheckOutcomeReason.None;
 					}
-					else if (m_bMemberLeftDuringCurrentCheck)
+					else if (bMembershipChangedDuringCheck || m_bMemberLeftDuringCurrentCheck)
 					{
+						// A join also invalidates the check (not just a leave): either way the set of
+						// players this check was judged against is no longer the lobby's actual membership.
 						reason = FullMeshCheckOutcomeReason.MemberLeft;
 					}
 					else if (FullMeshConnectivityChecks.IsEmpty)
@@ -1336,6 +1353,11 @@ public async Task FinalizeACChecks()
 			Members[slotIndex] = newMember;
 			TimeMemberLeft[playerSession.m_UserID] = DateTime.UnixEpoch;
 
+			// Membership just changed: any previously-passed mesh check no longer describes who is
+			// actually in the lobby.
+			++MembershipVersion;
+			LastFullMeshConnectivityCheckOutcome = null;
+
 			// Lobby members leave public-room presence.
 			playerSession.TryUpdateSessionNetworkRoom(-1);
 
@@ -1449,6 +1471,20 @@ public async Task FinalizeACChecks()
 				LobbyMember placeholderMember = new LobbyMember(this, null, -1, String.Empty, String.Empty, 0, -1, -1, -1, EPlayerType.SLOT_OPEN, member.SlotIndex, true);
 				Members[member.SlotIndex] = placeholderMember;
 				TimeMemberLeft[member.UserID] = DateTime.UtcNow;
+
+				// Membership just changed: any previously-passed mesh check no longer describes who
+				// is actually in the lobby.
+				++MembershipVersion;
+				LastFullMeshConnectivityCheckOutcome = null;
+
+				// A quick match must never start on a stale "everyone joined/connected" verdict once
+				// someone has left. This is a direct static call (not an event) that only ever touches
+				// MatchmakingBucket's own lock, never this lobby's gate, so it is safe to make from in
+				// here.
+				if (LobbyType == ELobbyType.QuickMatch)
+				{
+					MatchmakingManager.InvalidateAutoStartForLobby(LobbyID);
+				}
 
 				OnAfterPlayerLeftLocked(member.UserID);
 
