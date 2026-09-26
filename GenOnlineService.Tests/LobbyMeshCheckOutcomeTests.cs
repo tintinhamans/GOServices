@@ -49,6 +49,22 @@ public class LobbyMeshCheckOutcomeTests
 		throw new Xunit.Sdk.XunitException("No FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST message was queued.");
 	}
 
+	// AddMember queues its own unrelated handshake traffic, so "channel is empty" isn't the right
+	// check for "no outcome was sent" - scan by msg_id instead, like ReadOutcome does.
+	private static void AssertNoOutcomeQueued(UserSession session)
+	{
+		int wantedMsgID = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST;
+
+		while (session.OutboundWebsocketSends.TryRead(out byte[]? bytes))
+		{
+			using JsonDocument doc = JsonDocument.Parse(bytes!);
+			if (doc.RootElement.TryGetProperty("msg_id", out JsonElement msgIdProp) && msgIdProp.GetInt32() == wantedMsgID)
+			{
+				Assert.Fail("A FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST was queued when none was expected.");
+			}
+		}
+	}
+
 	[Fact]
 	public async Task SingleHumanLobby_ChecksCompleteWithNoReason()
 	{
@@ -99,8 +115,11 @@ public class LobbyMeshCheckOutcomeTests
 	}
 
 	[Fact]
-	public async Task StartingANewCheckCompletesThePreviousOneAsSuperseded()
+	public async Task StartingANewCheckDiscardsThePreviousOneSilently()
 	{
+		// The released client keeps a single callback slot for this message and consumes the FIRST
+		// one it receives, so a superseded check must send NOTHING - only the newer check's own
+		// eventual completion may answer the client.
 		(UserSession owner, Lobby lobby) = await MakeLobbyWithRegisteredHostAsync(extraMembers: 0);
 
 		await lobby.StartFullMeshConnectivityCheck();
@@ -111,14 +130,45 @@ public class LobbyMeshCheckOutcomeTests
 
 		Assert.NotEqual(firstCheckID, secondCheckID);
 
-		// The first StartFullMeshConnectivityCheck call queued nothing (nothing to supersede yet);
-		// the second call is the one that must have completed the first check before starting itself.
-		WebSocketMessage_FullMeshConnectivityCheckOutcome outcome = ReadOutcome(owner);
-		Assert.False(outcome.mesh_complete);
-		Assert.Equal("check_superseded", outcome.reason);
-
-		// The second (current) check is still pending - only one outcome was sent.
-		Assert.True(lobby.PendingFullMeshConnectivityChecks);
+		// Nothing was sent for the discarded first check.
 		Assert.False(owner.OutboundWebsocketSends.TryRead(out _));
+		Assert.True(lobby.PendingFullMeshConnectivityChecks);
+
+		// The second (current) check still completes normally and is the one true answer delivered.
+		await Task.Delay(50);
+		await lobby.ProcessPendingFullMeshConnectivityChecks();
+
+		WebSocketMessage_FullMeshConnectivityCheckOutcome outcome = ReadOutcome(owner);
+		Assert.True(outcome.mesh_complete);
+	}
+
+	[Fact]
+	public async Task CompletionIsNotSentWhenTheRequesterIsNoLongerOwner()
+	{
+		// The requesting owner leaves mid-check (forcing host migration) before it completes. The
+		// new owner never asked for this check, so must not have it land in their callback slot as
+		// an answer to a question they didn't ask - and the departed former owner is gone too.
+		UserSession owner = TestHelpers.MakeUserSession();
+		TestHelpers.RegisterSessionForTests(owner);
+		UserSession other = TestHelpers.MakeUserSession();
+		TestHelpers.RegisterSessionForTests(other);
+
+		Lobby lobby = TestHelpers.MakeLobby(owner);
+		UserLobbyPreferences prefs = TestHelpers.MakeLobbyPreferences();
+		Assert.True(await lobby.AddMember(owner, "Owner", 0, true, prefs));
+		Assert.True(await lobby.AddMember(other, "Other", 0, true, prefs));
+
+		await lobby.StartFullMeshConnectivityCheck();
+
+		LobbyMember ownerMember = lobby.GetMemberFromUserID(owner.m_UserID)!;
+		await lobby.RemoveMember(ownerMember);
+		Assert.Equal(other.m_UserID, lobby.Owner);
+
+		await Task.Delay(50);
+		await lobby.ProcessPendingFullMeshConnectivityChecks();
+
+		Assert.False(lobby.PendingFullMeshConnectivityChecks);
+		AssertNoOutcomeQueued(owner);
+		AssertNoOutcomeQueued(other);
 	}
 }

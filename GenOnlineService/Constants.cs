@@ -3019,9 +3019,12 @@ namespace GenOnlineService
 		public string display_name { get; set; } = String.Empty;
 	}
 
-	// Sent as FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST. The server guarantees exactly
-	// one of these for every check it starts (via Lobby.StartFullMeshConnectivityCheck), whether it
-	// succeeds, times out, is cut short by a member leaving, or is pre-empted by a newer check.
+	// Sent as FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST. The released client keeps a
+	// single callback slot for this and consumes the FIRST one it receives, so the server guarantees
+	// exactly one of these for every check the CURRENT owner is still waiting on - never more than
+	// one "in flight" answer. A check that gets superseded by a newer one, or whose requester is no
+	// longer the lobby's owner (e.g. they left and host migration promoted someone else), sends
+	// nothing at all: see Lobby.CompleteFullMeshConnectivityCheckLocked.
 	public class WebSocketMessage_FullMeshConnectivityCheckOutcome: WebSocketMessage
 	{
 		public bool mesh_complete { get; set; }
@@ -3031,7 +3034,6 @@ namespace GenOnlineService
 		//   "missing_connections" - the check ran to completion with a real connection still missing
 		//   "timeout"             - nobody ever reported a connectivity snapshot before the window closed
 		//   "member_left"         - a member left the lobby while this check was pending
-		//   "check_superseded"    - a newer check started before this one could finish
 		public string reason { get; set; } = string.Empty;
 	}
 

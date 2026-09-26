@@ -71,16 +71,23 @@ namespace GenOnlineService
 	//    connectivity snapshot, so nothing could be judged connected.
 	//  - MemberLeft: a member left the lobby while this check was pending, so the outcome may be
 	//    explained by that departure rather than a real connectivity failure.
-	//  - CheckSuperseded: a new check was started (StartFullMeshConnectivityCheck) before this one
-	//    finished. The server guarantees a COMPLETE_TO_HOST for every check it starts, so the
-	//    superseded check is completed with this reason before the new one begins.
+	//
+	// A check that gets superseded (a newer StartFullMeshConnectivityCheck call arrives before this
+	// one finishes) or whose requester is no longer the lobby's owner (they left and host migration
+	// promoted someone else) never sends a COMPLETE_TO_HOST at all - see
+	// Lobby.CompleteFullMeshConnectivityCheckLocked. The released client keeps a single callback
+	// slot and consumes the FIRST completion it receives, so sending a stale/superseded answer
+	// would be consumed as the answer to whatever check the client is actually still waiting on and
+	// the real answer would then be silently dropped. The guarantee is therefore scoped to "the
+	// CURRENT owner gets exactly one completion for the check they are currently waiting on", not
+	// "every StartFullMeshConnectivityCheck call produces a message": a superseded check's own
+	// question is answered by the newer check's eventual completion instead.
 	internal static class FullMeshCheckOutcomeReason
 	{
 		internal const string None = "";
 		internal const string MissingConnections = "missing_connections";
 		internal const string Timeout = "timeout";
 		internal const string MemberLeft = "member_left";
-		internal const string CheckSuperseded = "check_superseded";
 	}
 
 	// Core:full_mesh_check_* in appsettings.json, read on use
@@ -230,6 +237,14 @@ namespace GenOnlineService
 		[JsonIgnore]
 		private bool m_bMemberLeftDuringCurrentCheck = false;
 
+		// The user who was Owner when the current check started (both real call sites - the
+		// websocket host-requests-begin handler and quickmatch's TriggerFullMeshConnectivityChecks -
+		// only ever start a check while its requester is the current owner). The eventual outcome is
+		// only ever sent to this user, and only if they are still Owner: see
+		// CompleteFullMeshConnectivityCheckLocked.
+		[JsonIgnore]
+		private Int64 m_MeshCheckRequestingUserID = -1;
+
 		private static Int64 s_NextFullMeshCheckID = 0;
 
 		// Backing counter for LobbyMember.JoinSequence: per-lobby, starts at 1, only ever assigned
@@ -307,13 +322,12 @@ namespace GenOnlineService
 			{
 				if (PendingFullMeshConnectivityChecks)
 				{
-					// A new check preempts whatever was still in flight. The previous check already told
-					// clients to start reporting, so without this it would never get its own
-					// COMPLETE_TO_HOST - breaking the "every started check completes" guarantee.
-					CompleteFullMeshConnectivityCheckLocked(
-						bMeshComplete: false,
-						lstMissingConnections: new List<MissingConnectionEntry>(),
-						reason: FullMeshCheckOutcomeReason.CheckSuperseded);
+					// A new check preempts whatever was still in flight. The old check's own question
+					// is answered by the new check's eventual completion instead of sending a stale
+					// COMPLETE_TO_HOST here: the released client has only one callback slot and would
+					// consume whichever answer arrives first, dropping the real one. So this discards
+					// the old check's state without sending anything.
+					DiscardPendingFullMeshCheckLocked();
 				}
 
 				FullMeshCheckID = Interlocked.Increment(ref s_NextFullMeshCheckID);
@@ -321,9 +335,24 @@ namespace GenOnlineService
 				m_TimeToRetryFullMeshChecks = -1;
 				LastFullMeshConnectivityCheckOutcome = null;
 				m_bMemberLeftDuringCurrentCheck = false;
+				// Both real callers only ever start a check while they are the current owner (the
+				// websocket handler checks this explicitly; quickmatch's dummy host is set as Owner at
+				// lobby creation), so Owner at this instant is the requester the eventual outcome
+				// belongs to.
+				m_MeshCheckRequestingUserID = Owner;
 				BeginFullMeshConnectivityCheckAttempt();
 				return Task.CompletedTask;
 			});
+		}
+
+		// Resets pending-check state without sending a COMPLETE_TO_HOST. Must only be called while
+		// holding m_LobbyGate.
+		private void DiscardPendingFullMeshCheckLocked()
+		{
+			PendingFullMeshConnectivityChecks = false;
+			TimeStartFullMeshChecks = -1;
+			m_TimeToRetryFullMeshChecks = -1;
+			LastFullMeshConnectivityCheckOutcome = null;
 		}
 
 		private void BeginFullMeshConnectivityCheckAttempt()
@@ -638,12 +667,18 @@ namespace GenOnlineService
 
 			// TODO_EFCORE: Later, these should really use lobby list instead of getting session from ID
 
-			// send to host
-			UserSession? hostSession = WebSocketManager.GetSessionFromUser(Owner, EUserSessionType.GameClient); // host should be a game client
-			if (hostSession != null)
+			// Only ever answer the user who actually asked for this check, and only while they are
+			// still the owner. If they left and host migration promoted someone else, the new owner
+			// never asked for this check and must not have it land in their single callback slot as
+			// the answer to a question they didn't ask.
+			if (m_MeshCheckRequestingUserID == Owner)
 			{
-				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outcome));
-				hostSession.QueueWebsocketSend(bytesJSON);
+				UserSession? hostSession = WebSocketManager.GetSessionFromUser(Owner, EUserSessionType.GameClient); // host should be a game client
+				if (hostSession != null)
+				{
+					byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outcome));
+					hostSession.QueueWebsocketSend(bytesJSON);
+				}
 			}
 
 			// reset state
