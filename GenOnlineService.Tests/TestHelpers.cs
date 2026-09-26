@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using GenOnlineService;
 
 namespace GenOnlineService.Tests;
@@ -6,6 +7,15 @@ namespace GenOnlineService.Tests;
 // a live websocket connection, so lobby/member logic can be unit tested in isolation.
 internal static class TestHelpers
 {
+	// AddMember calls UserSession.TryUpdateSessionNetworkRoom, which reads the process-wide
+	// RoomCatalog singleton. Initialize it once for the whole test run with a minimal catalog so
+	// lobby tests don't need a real appsettings-style room catalog file on disk.
+	[ModuleInitializer]
+	internal static void InitializeRoomCatalogForTests()
+	{
+		RoomCatalog.InitializeFromJsonForTests("""[{"name":"Global","default":false,"rooms":[]}]""");
+	}
+
 	private static Int64 s_NextUserID = 1;
 
 	public static UserSession MakeUserSession(string continent = "NA", string country = "US")

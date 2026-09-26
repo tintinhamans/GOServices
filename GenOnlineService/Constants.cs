@@ -199,6 +199,13 @@ namespace GenOnlineService
 			}
 		}
 
+		// Lets tests initialize a minimal catalog from an in-memory JSON string, without needing a
+		// real appsettings-style catalog file on disk.
+		internal static void InitializeFromJsonForTests(string json)
+		{
+			s_catalog = CreateFromJson(json);
+		}
+
 		public static bool TryResolveTargetRoomID(int selectedRoomID, out Int16 targetRoomID)
 		{
 			return Current.TryResolveTargetRoomID(selectedRoomID, out targetRoomID);
