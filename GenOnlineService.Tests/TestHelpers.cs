@@ -19,7 +19,11 @@ internal static class TestHelpers
 
 	// Mesh-check tests need a bounded, near-instant attempt window instead of the real 8s default.
 	// FullMeshCheckSettings.Get falls back to its default for any value <= 0, so 1ms (plus a short
-	// sleep in the tests themselves) is used rather than 0.
+	// sleep in the tests themselves) is used rather than 0. Also carries a distinctive
+	// reconnect_grace_period_ms so config-driven tests can assert the value came from config
+	// rather than from UserSessionSettings' own default.
+	internal const Int64 ConfiguredReconnectGracePeriodMSForTests = 12345;
+
 	[ModuleInitializer]
 	internal static void InitializeMeshCheckSettingsForTests()
 	{
@@ -30,6 +34,7 @@ internal static class TestHelpers
 				["Core:full_mesh_check_snapshot_interval_ms"] = "1",
 				["Core:full_mesh_check_retry_delay_ms"] = "1",
 				["Core:full_mesh_check_max_attempts"] = "1",
+				["Core:reconnect_grace_period_ms"] = ConfiguredReconnectGracePeriodMSForTests.ToString(),
 			})
 			.Build();
 	}
