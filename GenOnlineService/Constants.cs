@@ -3166,6 +3166,14 @@ namespace GenOnlineService
 		{
 			get; set;
 		}
+
+		// Snapshot of the lobby the server already created for this match, serialized the same way
+		// as the "lobby" field on GET lobby. Lets a client join without a round trip; older clients
+		// that ignore unknown fields are unaffected and still use lobby_id to fetch it themselves.
+		public Lobby? lobby
+		{
+			get; set;
+		}
 	}
 
 	public class WebSocketMessage_MatchmakerStartGame : WebSocketMessage

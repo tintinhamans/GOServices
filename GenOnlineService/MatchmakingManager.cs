@@ -1270,6 +1270,9 @@ static class MatchmakingManager
 								WebSocketMessage_MatchmakerJoinLobby joinAction = new WebSocketMessage_MatchmakerJoinLobby();
 								joinAction.msg_id = (int)EWebSocketMessageID.MATCHMAKING_ACTION_JOIN_PREARRANGED_LOBBY;
 								joinAction.lobby_id = m_LobbyID;
+								// The lobby already exists at this point (CreateLobby above), so hand clients a
+								// snapshot of it directly and save them the round trip to GET it themselves.
+								joinAction.lobby = lobbyManager.GetLobby(m_LobbyID);
 								byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(joinAction));
 
 								foreach (MatchmakingBucketMember member in m_lstMembers)
