@@ -1245,6 +1245,16 @@ namespace GenOnlineService
 				ACExeCRC = Helpers.g_dictInitialExeCRCs[ownerID].ToUpper();
 				Helpers.g_dictInitialExeCRCs.Remove(ownerID, out string removedCRC);
 			}
+
+			// store the game exe/ini CRCs registered at login (new clients only - see
+			// Helpers.RegisterInitialPlayerCRCsFromLoginPayload). Matchmaking registration
+			// (MatchmakingManager.RegisterPlayer) may still overwrite these from its own request
+			// body; that's fine as long as the values agree.
+			if (Helpers.g_dictInitialGameCRCs.TryRemove(ownerID, out (UInt32 ExeCRC, UInt32 IniCRC) gameCRCs))
+			{
+				ExeCRC = gameCRCs.ExeCRC;
+				IniCRC = gameCRCs.IniCRC;
+			}
 		}
 
 		public void MarkAbandoned()

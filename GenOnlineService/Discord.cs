@@ -62,6 +62,69 @@ public static class Helpers
 		g_dictInitialExeCRCs[user_id] = exe_crc;
 	}
 
+	// Handoff for the UInt32 game CRCs (the same ExeCRC/IniCRC meaning as lobby create/matchmaking
+	// bodies), separate from the AC .text-section hash above. Set at login, consumed once by
+	// UserSession's constructor when the websocket session is actually created.
+	public static ConcurrentDictionary<Int64, (UInt32 ExeCRC, UInt32 IniCRC)> g_dictInitialGameCRCs = new();
+	public static void RegisterInitialPlayerGameCRCs(Int64 user_id, UInt32 exeCrc, UInt32 iniCrc)
+	{
+		g_dictInitialGameCRCs[user_id] = (exeCrc, iniCrc);
+	}
+
+	// exe_crc/ini_crc may arrive as a JSON number or a numeric string depending on the client;
+	// never throw on a malformed login payload.
+	public static bool TryParseUInt32Flexible(JsonElement element, out UInt32 value)
+	{
+		if (element.ValueKind == JsonValueKind.Number && element.TryGetUInt32(out value))
+		{
+			return true;
+		}
+
+		if (element.ValueKind == JsonValueKind.String && UInt32.TryParse(element.GetString(), out value))
+		{
+			return true;
+		}
+
+		value = 0;
+		return false;
+	}
+
+	// Login payload CRC handling.
+	//   ac_exe_crc - SHA-256 hex hash of the exe's .text section, for anti-cheat.
+	//   exe_crc    - meaning depends on whether ac_exe_crc is present:
+	//                  - present (new client): exe_crc is the UInt32 game CRC (same value/meaning
+	//                    as the exe_crc field in lobby create / matchmaking bodies).
+	//                  - absent (currently released client): exe_crc IS the AC hash, exactly as
+	//                    before this was split into two fields, and no game exe CRC is known.
+	//   ini_crc    - UInt32 game CRC, sent by both old and new clients, always with the same meaning.
+	// TODO: Remove the "ac_exe_crc absent" branch once every released client sends ac_exe_crc.
+	public static void RegisterInitialPlayerCRCsFromLoginPayload(Int64 user_id, Dictionary<string, JsonElement> data)
+	{
+		string acExeCrc;
+		bool bHasGameExeCrc = false;
+		UInt32 gameExeCrc = 0;
+
+		if (data.ContainsKey("ac_exe_crc"))
+		{
+			acExeCrc = data["ac_exe_crc"].ToString();
+			bHasGameExeCrc = data.ContainsKey("exe_crc") && TryParseUInt32Flexible(data["exe_crc"], out gameExeCrc);
+		}
+		else
+		{
+			acExeCrc = data.ContainsKey("exe_crc") ? data["exe_crc"].ToString() : "NONE";
+		}
+
+		RegisterInitialPlayerExeCRC(user_id, acExeCrc);
+
+		UInt32 iniCrc = 0;
+		bool bHasIniCrc = data.ContainsKey("ini_crc") && TryParseUInt32Flexible(data["ini_crc"], out iniCrc);
+
+		if (bHasGameExeCrc || bHasIniCrc)
+		{
+			RegisterInitialPlayerGameCRCs(user_id, bHasGameExeCrc ? gameExeCrc : 0, bHasIniCrc ? iniCrc : 0);
+		}
+	}
+
 	public static string ComputeMD5Hash(string input)
 	{
 		using (MD5 md5 = MD5.Create())
