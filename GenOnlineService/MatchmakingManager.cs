@@ -156,9 +156,7 @@ public class Playlist
 	public int MaxPlayers { get; private set; }
 	public int MinSelectedMaps { get; private set; }
 
-	// Wire-compat alias: the released client's GET Playlists reader expects this exact key with
-	// this exact value (the playlist's player-count ceiling). Never change what this emits;
-	// MaxPlayers is the additive field new clients should read instead.
+	// Wire-compat alias for GET Playlists; MaxPlayers is the additive field.
 	public int DesiredPlayers => MaxPlayers;
 
 	public bool AllowTeams { get; private set; }
@@ -224,8 +222,7 @@ static class MatchmakingManager
 		return errors.Count == 0;
 	}
 
-	// Invalid playlists are excluded (loudly logged) rather than crashing the whole service, so a
-	// config error in one playlist doesn't take matchmaking down for every other playlist.
+	// Invalid playlists are excluded and logged rather than crashing startup.
 	public static void ValidatePlaylistsAtStartup()
 	{
 		List<UInt16> invalidPlaylistIDs = new();
@@ -450,11 +447,7 @@ static class MatchmakingManager
 			return null;
 		}
 
-		// Selects a map for a match of EXACTLY matchSize players. The chosen map's slot count must
-		// always equal matchSize - never a different size, on any path (mutually-agreed selection or
-		// fallback). Returns false if no exact-matchSize map exists anywhere in the playlist; the
-		// caller must not form a match at that size in that case (a validated playlist - see
-		// MatchmakingManager.ValidatePlaylistMapSizes - never hits this for any Min<=N<=Max).
+		// Selects a map with EXACTLY matchSize slots, never a different size. Returns false if none exists.
 		public bool TryDetermineMapForSize(int matchSize, out string strMapName, out string strMapPath)
 		{
 			strMapName = string.Empty;
@@ -465,7 +458,6 @@ static class MatchmakingManager
 				return false;
 			}
 
-			// condense to maps that have mutually agreed upon preference from every participant
 			var perPlayerMapSet = new List<HashSet<int>>();
 			var finalMapSet = new HashSet<int>(lstMapIndices.ToList());
 
@@ -483,7 +475,6 @@ static class MatchmakingManager
 				finalMapSet.IntersectWith(memberMapSet);
 			}
 
-			// Only a map with EXACTLY matchSize slots may ever be chosen.
 			List<int> exactMatches = finalMapSet
 				.Where(mapIndex => mapIndex >= 0 && mapIndex < playlist.Maps.Count && playlist.Maps[mapIndex].MaxPlayers == matchSize)
 				.ToList();
@@ -496,9 +487,6 @@ static class MatchmakingManager
 				return true;
 			}
 
-			// No mutually-agreed map at the right size: fall back to a random EXACT-matchSize map
-			// from the whole playlist. Never a different slot count - there is no "largest map"
-			// fallback anymore.
 			List<PlaylistMap> exactSizeMaps = playlist.Maps.Where(map => map.MaxPlayers == matchSize).ToList();
 			if (exactSizeMaps.Count > 0)
 			{
@@ -715,9 +703,6 @@ static class MatchmakingManager
 			return lobbyID != -1 && m_LobbyID == lobbyID;
 		}
 
-		// Same invalidation the existing RemovePlayer/PruneDeadMembers paths use, exposed for
-		// external hooks (a lobby-level leave, or a session going abandoned) that don't go through
-		// this bucket's own member list.
 		public void InvalidateAutoStart()
 		{
 			lock (m_StateLock)
@@ -883,8 +868,6 @@ static class MatchmakingManager
 			m_lstMembers.Add(new MatchmakingBucketMember(owningSession));
 		}
 
-		// Test-only seams for exercising VerifyMatchIsStillValid without the full Tick()/DB-backed
-		// registration flow.
 		internal void AddMemberForTests(UserSession session)
 		{
 			m_lstMembers.Add(new MatchmakingBucketMember(session));
@@ -947,9 +930,7 @@ static class MatchmakingManager
 			return false;
 		}
 
-		// Splits off the last (CurrentMemberCount() - keepCount) members (shortest-waiting) into a
-		// new bucket with the same playlist/CRC/anticheat grouping, so they keep searching while the
-		// first keepCount members form now.
+		// Keeps the first keepCount members; moves the rest into a new bucket with the same grouping.
 		private async Task SplitOffExcessMembersToNewBucketAsync(int keepCount)
 		{
 			List<MatchmakingBucketMember> excessMembers = new();
@@ -1006,9 +987,7 @@ static class MatchmakingManager
 		Int64 m_StartTime = -1;
 		Int64 m_timeStartedWaitingOnLobbyJoins = -1;
 
-		// The number of players the match was actually formed with, captured the moment the lobby is
-		// created. The pre-start re-verification requires the lobby to still hold exactly this many
-		// human members - not just "at least MaxPlayers" - before ever sending START_GAME.
+		// Player count the match was formed with; the map's slot count must match this.
 		int m_MatchFormedSize = -1;
 
 		// how long we give everyone to actually connect to the QuickMatch lobby before we give up on the stragglers
@@ -1084,15 +1063,7 @@ static class MatchmakingManager
 			}
 		}
 
-		// Re-verifies, right before starting the countdown and right before actually sending
-		// START_GAME, that the match this bucket formed is still exactly what is about to start:
-		// same players, all still live, and the mesh check that passed is still valid for the
-		// CURRENT membership. All reads here are simple property/collection reads (no mutation), and
-		// Lobby's own gate already makes every membership mutation atomic, so this is a
-		// consistent-enough final sanity check without needing to go through that gate itself.
-		// Internal (not private) so this - the actual gate that would block START_GAME for a lobby
-		// leave, an abandoned session, or a stale mesh-check outcome - is directly unit-testable
-		// without driving the full Tick() state machine (which needs a live DB for CreateLobby).
+		// Re-verifies the match is still valid to start: same players, all live, mesh check still valid.
 		internal bool VerifyMatchIsStillValid(Lobby lobby, out string failureReason)
 		{
 			List<LobbyMember> humanMembers = lobby.Members.Where(m => m.IsHuman()).ToList();
@@ -1111,7 +1082,6 @@ static class MatchmakingManager
 
 			HashSet<Int64> lobbyUserIDs = humanMembers.Select(m => m.UserID).ToHashSet();
 
-			// ConcurrentList<T> doesn't implement IEnumerable<T>, so a plain loop instead of LINQ.
 			HashSet<Int64> bucketUserIDs = new();
 			foreach (MatchmakingBucketMember bucketMember in m_lstMembers)
 			{
@@ -1513,8 +1483,6 @@ static class MatchmakingManager
 								WebSocketMessage_MatchmakerJoinLobby joinAction = new WebSocketMessage_MatchmakerJoinLobby();
 								joinAction.msg_id = (int)EWebSocketMessageID.MATCHMAKING_ACTION_JOIN_PREARRANGED_LOBBY;
 								joinAction.lobby_id = m_LobbyID;
-								// The lobby already exists at this point (CreateLobby above), so hand clients a
-								// snapshot of it directly and save them the round trip to GET it themselves.
 								joinAction.lobby = lobbyManager.GetLobby(m_LobbyID);
 								byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(joinAction));
 
@@ -2091,11 +2059,7 @@ static class MatchmakingManager
 		m_dictMatchmakingBuckets.GetOrAdd(playlistID, _ => new ConcurrentBag<MatchmakingBucket>()).Add(bucket);
 	}
 
-	// Hook from Lobby (a member left) or WebSocketManager (a session in a QM lobby went abandoned)
-	// into whichever bucket owns that lobby, so a stale "everyone connected" verdict can never be
-	// used to start a match that no longer holds the players it was formed with. Only ever touches
-	// MatchmakingBucket's own m_StateLock - never a Lobby's gate - so it is safe to call from
-	// anywhere, including from inside Lobby.RemoveMember's own gated callback.
+	// Safe to call from inside Lobby.RemoveMember's gated callback: only touches m_StateLock.
 	public static void InvalidateAutoStartForLobby(Int64 lobbyID)
 	{
 		if (lobbyID == -1)
