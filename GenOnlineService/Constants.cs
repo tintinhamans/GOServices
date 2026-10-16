@@ -589,10 +589,10 @@ namespace GenOnlineService
 				await ServiceLocator.Services.GetRequiredService<LobbyManager>().ExpireSessionAsync(userData.Session);
 		}
 
-		public static Task DeleteSession(Int64 userID, EUserSessionType sessionType, UserWebSocketInstance? oldWS, bool invalidateCache, UserSession? expectedSession = null)
+		public static Task DeleteSession(Int64 userID, EUserSessionType sessionType, UserWebSocketInstance? oldWS, bool destroySession, UserSession? expectedSession = null)
 		{
 			var session = expectedSession ?? oldWS?.OwnerSession ?? GetSessionFromUser(userID, sessionType);
-			return ServiceLocator.Services.GetRequiredService<LobbyManager>().DisconnectSessionAsync(session, oldWS, invalidateCache);
+			return ServiceLocator.Services.GetRequiredService<LobbyManager>().DisconnectSessionAsync(session, oldWS, destroySession);
 		}
 
 		internal static UserWebSocketInstance? DetachSocket(UserSession session)

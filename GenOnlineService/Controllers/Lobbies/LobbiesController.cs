@@ -340,7 +340,7 @@ namespace GenOnlineService.Controllers
 									result.result = 1;
 									result.lobby_id = newLobbyID;
 
-									var credentials = await _lobbyManager.CreateLobbyRelayCredentials(playerSession, newLobbyID);
+									var credentials = await _lobbyManager.CreateLobbyRelayCredentialsAsync(playerSession, newLobbyID);
 									result.turn_username = credentials.Username;
 									result.turn_token = credentials.Token;
 								}

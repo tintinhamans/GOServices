@@ -29,20 +29,20 @@ public partial class LobbyManager
 	{
 		using var membership = await AcquireMembershipGateAsync(userID);
 		var previous = membershipConnections.GetSession(userID, sessionType);
-		if (!reconnect && previous != null) await DestroySession(previous);
+		if (!reconnect && previous != null) await DestroySessionAsync(previous);
 		if (reconnect && (previous == null || previous.IsRetired)) return null;
 		return await WebSocketManager.InstallSession(db, sessionType, reconnect, userID, clientID,
 			ipAddress, continent, country, latitude, longitude, admin);
 	}
 
-	internal async Task DisconnectSessionAsync(UserSession? session, UserWebSocketInstance? socket, bool invalidateCache)
+	internal async Task DisconnectSessionAsync(UserSession? session, UserWebSocketInstance? socket, bool destroySession)
 	{
 		if (session == null) return;
 		using (await AcquireMembershipGateAsync(session.m_UserID))
 		{
 			if (IsCurrentSession(session) && ReferenceEquals(WebSocketManager.GetWebSocketForSession(session), socket))
 			{
-				if (invalidateCache) await DestroySession(session);
+				if (destroySession) await DestroySessionAsync(session);
 				else
 				{
 					WebSocketManager.DetachSocket(session);
@@ -64,14 +64,14 @@ public partial class LobbyManager
 		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
 		if (!IsCurrentSession(session)) return false;
 		if (expiredOnly && !WebSocketManager.ShouldStillClearAbandonedSession(session, session)) return false;
-		await DestroySession(session);
+		await DestroySessionAsync(session);
 		return true;
 	}
 
 	private bool IsCurrentSession(UserSession session) =>
 		ReferenceEquals(membershipConnections.GetSession(session.m_UserID, session.GetSessionType()), session);
 
-	private async Task DestroySession(UserSession session)
+	private async Task DestroySessionAsync(UserSession session)
 	{
 		session.Retire();
 		bool gameplay = SessionHelpers.SessionTypeHasAccessTo(session.GetSessionType(), ESessionAccessType.Gameplay);
