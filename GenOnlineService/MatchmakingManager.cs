@@ -970,7 +970,7 @@ static class MatchmakingManager
 						// TODO: Remove this fallback once all supported clients handle MATCHMAKING_ACTION_REQUEUE.
 						// Legacy clients do not understand the requeue action, but they can still tear down
 						// peer and anti-cheat connections before joining the next temporary lobby.
-						await lobbyManager.RemoveMatchmakingMember(quickMatchLobby, lobbyMember, sendPeerTeardown: true);
+						await lobbyManager.RemoveMatchmakingMemberAsync(quickMatchLobby, lobbyMember, sendPeerTeardown: true);
 					}
 				}
 
@@ -1930,7 +1930,7 @@ static class MatchmakingManager
 						if (lobbyMember != null)
 						{
 							Console.WriteLine("User {0} Leave MM Lobby", plr.m_UserID);
-							await lobbyManager.RemoveMatchmakingMember(lobby, lobbyMember);
+							await lobbyManager.RemoveMatchmakingMemberAsync(lobby, lobbyMember);
 						}
 					}
 
@@ -1966,7 +1966,7 @@ static class MatchmakingManager
 		if (!bCancellationRejected)
 		{
 			Console.WriteLine("[Source 4] User {0} Leave Any Lobby", plr.m_UserID);
-			await lobbyManager.LeaveAnyLobby(plr.m_UserID);
+			await lobbyManager.LeaveAllLobbiesAsync(plr.m_UserID);
 		}
 	}
 }

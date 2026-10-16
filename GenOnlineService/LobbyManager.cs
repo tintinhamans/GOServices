@@ -111,7 +111,7 @@ namespace GenOnlineService
 		// SemaphoreSlim, so there is exactly one lock to reason about and no lock-ordering hazard
 		// between the two. It is NOT reentrant: a callback passed to RunExclusiveAsync must never
 		// call back into RunExclusiveAsync on this same lobby, or it will deadlock - callers that are
-		// already inside a callback (e.g. DoHostMigration, called from RemoveMember's callback) must
+		// already inside a callback (e.g. DoHostMigration, called from RemoveMemberAsync's callback) must
 		// mutate state directly instead. Sending a websocket message from inside a callback is safe:
 		// QueueWebsocketSend only enqueues bytes onto an in-memory bounded channel (a non-blocking
 		// TryWrite) - it never performs real network I/O itself, so it cannot block while the gate is
@@ -720,8 +720,8 @@ namespace GenOnlineService
         public ELobbyJoinability LobbyJoinability { get; private set; } = ELobbyJoinability.Public; // public by default
 
 
-        public const int maxLobbySize = 8;
-		public LobbyMember[] Members { get; private set; } = new LobbyMember[maxLobbySize];
+        public const int MaxLobbySize = 8;
+		public LobbyMember[] Members { get; private set; } = new LobbyMember[MaxLobbySize];
 
 		public EKnownAnticheatID AnticheatID { get; private set; }  = EKnownAnticheatID.NONE;
 
@@ -847,11 +847,11 @@ namespace GenOnlineService
 			RNGSeed = rng_seed;
 			MaximumCameraHeight = max_cam_height;
 			LobbyType = lobbyType;
-			Members = new LobbyMember[maxLobbySize];
+			Members = new LobbyMember[MaxLobbySize];
 			AnticheatID = inAnticheatID;
 
 			// create default slots
-			for (UInt16 i = 0; i < maxLobbySize; ++i)
+			for (UInt16 i = 0; i < MaxLobbySize; ++i)
 			{
 				LobbyMember placeholderMember = new LobbyMember(this, null, -1, String.Empty, String.Empty, 0, -1, -1, -1, i < max_players ? EPlayerType.SLOT_OPEN : EPlayerType.SLOT_CLOSED, i, true);
 				Members[i] = placeholderMember;
@@ -861,8 +861,8 @@ namespace GenOnlineService
 
         public event Action<Lobby>? OnLobbyNeedsDestroyed;
 
-		// Must only be called while holding m_LobbyGate (from within RemoveMember's callback): it reads
-		// and mutates Members/Owner and must observe RemoveMember's slot clear atomically with any
+		// Must only be called while holding m_LobbyGate (from within RemoveMemberAsync's callback): it reads
+		// and mutates Members/Owner and must observe RemoveMemberAsync's slot clear atomically with any
 		// concurrent join/leave/migration.
 		private void OnAfterPlayerLeftLocked(Int64 leavingUserID)
 		{
@@ -934,7 +934,7 @@ public async Task FinalizeACChecks()
 		}
 
 		// Runs under the per-lobby gate: this mutates slot state and previously ran unguarded,
-		// racing against AddMember/RemoveMember/other slot updates. Sequential with (never nested
+		// racing against AddMember/RemoveMemberAsync/other slot updates. Sequential with (never nested
 		// inside) StartFullMeshConnectivityCheck's own gate use - callers await this first and then
 		// await StartFullMeshConnectivityCheck as a separate gated operation, so the gate is never
 		// re-entered.
@@ -956,7 +956,7 @@ public async Task FinalizeACChecks()
 		}
 
 		// Must only be called while holding m_LobbyGate (currently only true from
-		// OnAfterPlayerLeftLocked, itself only called from within RemoveMember's callback).
+		// OnAfterPlayerLeftLocked, itself only called from within RemoveMemberAsync's callback).
 		private void DoHostMigration()
 		{
 			Int64 oldOwner = Owner;
@@ -1084,10 +1084,10 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal Task<LobbyMembershipStatus> CheckJoinAdmission(JoinLobbyCommand command) =>
+		internal Task<LobbyMembershipStatus> CheckJoinAdmissionAsync(JoinLobbyCommand command) =>
 			RunExclusiveAsync(() => Task.FromResult(ValidateJoin(command)));
 
-		internal Task<LobbyMembershipStatus> JoinMember(JoinLobbyCommand command, UserSession session, string displayName, UserLobbyPreferences preferences) =>
+		internal Task<LobbyMembershipStatus> JoinMemberAsync(JoinLobbyCommand command, UserSession session, string displayName, UserLobbyPreferences preferences) =>
 			RunExclusiveAsync(() =>
 			{
 				var admission = ValidateJoin(command);
@@ -1096,7 +1096,7 @@ public async Task FinalizeACChecks()
 					: admission);
 			});
 
-		internal Task<LobbyMembershipStatus> AddCreator(UserSession session, string displayName, ushort preferredPort, UserLobbyPreferences preferences) =>
+		internal Task<LobbyMembershipStatus> AddCreatorAsync(UserSession session, string displayName, ushort preferredPort, UserLobbyPreferences preferences) =>
 			RunExclusiveAsync(() => Task.FromResult(AddMemberLocked(session, displayName, preferredPort, true, preferences)));
 
 		private LobbyMembershipStatus AddMemberLocked(UserSession playerSession, string strDisplayName, UInt16 userPreferredPort, bool bHasMap, UserLobbyPreferences lobbyPrefs)
@@ -1285,7 +1285,7 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal async Task RemoveMember(long userID, LobbyMember? expectedMember = null)
+		internal async Task RemoveMemberAsync(long userID, LobbyMember? expectedMember = null)
 		{
 			LobbyMember? removed = await RunExclusiveAsync(() =>
 			{
@@ -1296,7 +1296,7 @@ public async Task FinalizeACChecks()
 			if (removed != null) PublishMemberRemoval(removed);
 		}
 
-		internal async Task<LobbyMembershipStatus> KickMember(KickLobbyMemberCommand command)
+		internal async Task<LobbyMembershipStatus> KickMemberAsync(KickLobbyMemberCommand command)
 		{
 			LobbyMember? removed = null;
 			var status = await RunExclusiveAsync(() =>
@@ -1921,13 +1921,13 @@ public async Task FinalizeACChecks()
 			UInt16 hostPreferredPort, bool bVanillaTeams, bool bTrackStats, UInt32 default_starting_cash, bool bPassworded, String strPassword, Int16 parentNetworkRoom, bool bAllowObservers,
 			UInt16 maxCamHeight, UInt32 exe_crc, UInt32 ini_crc, ELobbyType lobbyType, EKnownAnticheatID anticheatID)
 		{
-			using var membership = await EnterMembershipAsync(owningSession.m_UserID);
+			using var membership = await AcquireMembershipGateAsync(owningSession.m_UserID);
 			Console.WriteLine("Created lobby");
 			// cant own two lobbies at once, unless in gameplay
-			await CleanupUserLobbiesNotStarted(owningSession.m_UserID);
+			await CleanupUserLobbiesNotStartedAsync(owningSession.m_UserID);
 
 			Console.WriteLine("[Source 3] User {0} Leave Any Lobby", owningSession.m_UserID);
-			await LeaveMemberships(owningSession.m_UserID);
+			await LeaveMembershipsAsync(owningSession.m_UserID);
 
 			int rng_seed = new Random().Next();
 
@@ -1957,7 +1957,7 @@ public async Task FinalizeACChecks()
 			{
 				var preferences = await Database.Users.GetUserLobbyPreferences(_db, owningSession.m_UserID);
 				if (preferences != null)
-					await newLobby.AddCreator(owningSession, strOwnerDisplayName, hostPreferredPort, preferences);
+					await newLobby.AddCreatorAsync(owningSession, strOwnerDisplayName, hostPreferredPort, preferences);
 			}
 
 			// Send initial lobby state and invalidate room listings.
@@ -1979,7 +1979,7 @@ public async Task FinalizeACChecks()
 			return m_dictLobbies.Count;
 		}
 
-		public async Task CleanupUserLobbiesNotStarted(Int64 UserID)
+		public async Task CleanupUserLobbiesNotStartedAsync(Int64 UserID)
 		{
 			List<Lobby> ownedLobbies = GetPlayerOwnedLobbies(UserID);
 			foreach (Lobby ownedLobby in ownedLobbies)

@@ -24,10 +24,10 @@ public sealed class LobbyMembershipConnections
 	public UserSession? GetSession(long userID, EUserSessionType sessionType) =>
 		WebSocketManager.GetSessionFromUser(userID, sessionType);
 
-	public Task DeleteRelayCredentials(long userID) =>
+	public Task DeleteRelayCredentialsAsync(long userID) =>
 		TURNCredentialManager.DeleteCredentialsForUser(userID);
 
-	public async Task<(string Username, string Token)> CreateRelayCredentials(long userID)
+	public async Task<(string Username, string Token)> CreateRelayCredentialsAsync(long userID)
 	{
 		try
 		{
