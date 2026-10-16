@@ -1983,7 +1983,7 @@ static class MatchmakingManager
 
 	// Only matchmaking state is changed here. Membership effects run after releasing
 	// this lock, so lifecycle operations can acquire user gate -> matchmaking lock.
-	internal static async Task<MatchmakingDetachment> DetachSession(UserSession player)
+	internal static async Task<MatchmakingDetachment> DetachSessionAsync(UserSession player)
 	{
 		await player.MatchmakingStateLock.WaitAsync();
 		try
@@ -2000,9 +2000,9 @@ static class MatchmakingManager
 		}
 	}
 
-	public static async Task DeregisterPlayer(UserSession player)
+	public static async Task DeregisterPlayerAsync(UserSession player)
 	{
-		var detached = await DetachSession(player);
+		var detached = await DetachSessionAsync(player);
 		var lobbies = ServiceLocator.Services.GetRequiredService<LobbyManager>();
 		foreach (var entry in detached.Members)
 			await lobbies.RemoveMatchmakingMemberAsync(entry.Lobby, entry.Member);
