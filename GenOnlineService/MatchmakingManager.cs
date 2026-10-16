@@ -872,7 +872,7 @@ static class MatchmakingManager
 
 		private async Task TriggerFullMeshConnectivityChecks(Lobby lobby)
 		{
-			m_MeshCheckID = await lobby.StartFullMeshConnectivityCheck();
+			m_MeshCheckID = await lobby.StartMeshCheckAsync();
 			lock (m_StateLock)
 			{
 				// Publish the state transition before any notification work. If a send fails, the
@@ -881,7 +881,7 @@ static class MatchmakingManager
 			}
 
 			// kept at or above the legacy threshold so short tuned checks don't show a start countdown on older clients
-			QueueSetupProgress(Math.Max(FullMeshCheckSettings.MaxDurationMS + SetupClientTimeoutMarginMs, LegacyClientCountdownThresholdMs));
+			QueueSetupProgress(Math.Max(FullMeshCheckSettings.MaxDurationMs + SetupClientTimeoutMarginMs, LegacyClientCountdownThresholdMs));
 
 			foreach (MatchmakingBucketMember member in m_lstMembers)
 			{
@@ -1044,7 +1044,7 @@ static class MatchmakingManager
 
 					await lobbyDuringMeshCheck.ProcessPendingFullMeshConnectivityChecks();
 
-					if (await lobbyDuringMeshCheck.GetFullMeshCheckResult(m_MeshCheckID) is bool meshComplete)
+					if (await lobbyDuringMeshCheck.GetValidatedMeshCheckResultAsync(m_MeshCheckID) is bool meshComplete)
 					{
 						bool bStartCountdown;
 						bool bAbortStart;
@@ -1108,7 +1108,7 @@ static class MatchmakingManager
 						return;
 					}
 
-					bool meshStillValid = await lobbyAfterCountdown.GetFullMeshCheckResult(m_MeshCheckID) == true;
+					bool meshStillValid = await lobbyAfterCountdown.GetValidatedMeshCheckResultAsync(m_MeshCheckID) == true;
 					bool bStartGame;
 					bool bAbortStart;
 					lock (m_StateLock)
