@@ -1265,6 +1265,7 @@ namespace GenOnlineService
 					});
 			}
 			RoomCatalog.Initialize(Path.Combine(builder.Environment.ContentRootPath, "data", "rooms.json"));
+			MatchmakingManager.ValidatePlaylistsAtStartup();
 
 			// Add services to the container.
 
