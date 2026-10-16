@@ -66,18 +66,18 @@ namespace GenOnlineService
 	internal static class FullMeshCheckSettings
 	{
 		// how long an attempt waits for every connection before judging it
-		internal static int AttemptWindowMS => Get("full_mesh_check_attempt_window_ms", 8000);
+		internal static int AttemptWindowMs => Get("full_mesh_check_attempt_window_ms", 8000);
 
 		// how often an incomplete attempt asks members for a fresh snapshot
-		internal static int SnapshotIntervalMS => Get("full_mesh_check_snapshot_interval_ms", 1000);
+		internal static int SnapshotIntervalMs => Get("full_mesh_check_snapshot_interval_ms", 1000);
 
 		// time given to re-signalled connections before the next attempt
-		internal static int RetryDelayMS => Get("full_mesh_check_retry_delay_ms", 3000);
+		internal static int RetryDelayMs => Get("full_mesh_check_retry_delay_ms", 3000);
 
 		internal static int MaxAttempts => Get("full_mesh_check_max_attempts", 2);
 
 		// upper bound for a whole check, used as the clients' setup timeout
-		internal static int MaxDurationMS => (AttemptWindowMS * MaxAttempts) + (RetryDelayMS * (MaxAttempts - 1));
+		internal static int MaxDurationMs => (AttemptWindowMs * MaxAttempts) + (RetryDelayMs * (MaxAttempts - 1));
 
 		private static int Get(string key, int defaultValue)
 		{
@@ -268,11 +268,11 @@ namespace GenOnlineService
 		private Dictionary<long, MeshParticipant> m_MeshParticipants = new();
 		private MeshParticipant? m_MeshHost;
 		private long m_MembershipVersion;
-		private long m_MeshMembershipVersion;
+		private long m_MembershipVersionAtMeshCheckStart;
 		[JsonIgnore]
 		public string? LastFullMeshCheckFailureReason { get; private set; }
 
-		public Task<long> StartFullMeshConnectivityCheck(UserSession? requester = null, UserWebSocketInstance? socket = null)
+		public Task<long> StartMeshCheckAsync(UserSession? requester = null, UserWebSocketInstance? socket = null)
 		{
 			return RunExclusiveAsync(() =>
 			{
@@ -290,7 +290,7 @@ namespace GenOnlineService
 				}
 				FullMeshCheckID = Interlocked.Increment(ref s_NextFullMeshCheckID);
 				FullMeshCheckAttempt = 1;
-				m_MeshMembershipVersion = m_MembershipVersion;
+				m_MembershipVersionAtMeshCheckStart = m_MembershipVersion;
 				m_MeshParticipants = new();
 				foreach (var member in Members.Where(member => member.IsHuman()))
 					if (member.GetSession().TryGetTarget(out var session))
@@ -300,7 +300,7 @@ namespace GenOnlineService
 				LastFullMeshConnectivityCheckOutcome = null;
 				LastFullMeshCheckFailureReason = null;
 				BeginFullMeshConnectivityCheckAttempt();
-				if (ValidateMeshOwnership()) SendFullMeshConnectivityCheckRequestToMembers();
+				if (EnsureMeshCheckIsCurrentLocked()) SendFullMeshConnectivityCheckRequestToMembers();
 				return Task.FromResult(FullMeshCheckID);
 			});
 		}
@@ -311,11 +311,11 @@ namespace GenOnlineService
 			&& !session.IsRetired && participant.Socket?.IsOpen == true
 			&& ReferenceEquals(WebSocketManager.GetWebSocketForSession(session), participant.Socket);
 
-		private bool ValidateMeshOwnership()
+		private bool EnsureMeshCheckIsCurrentLocked()
 		{
 			if (FullMeshCheckID == 0) return false;
 			string? reason = State != ELobbyState.GAME_SETUP ? "lobby_state_changed"
-				: m_MembershipVersion != m_MeshMembershipVersion
+				: m_MembershipVersion != m_MembershipVersionAtMeshCheckStart
 				|| m_MeshParticipants.Count != GetNumberOfHumans() ? "membership_changed"
 				: m_MeshParticipants.Values.Any(participant => !IsCurrentMeshParticipant(participant)) ? "session_changed"
 				: m_MeshHost == null || Owner != m_MeshHost.Session.m_UserID ? "host_changed" : null;
@@ -334,16 +334,16 @@ namespace GenOnlineService
 			}
 		}
 
-		internal Task InvalidateMeshForSession(UserSession session) => RunExclusiveAsync(() =>
+		internal Task InvalidateMeshForSessionAsync(UserSession session) => RunExclusiveAsync(() =>
 		{
 			if (m_MeshParticipants.Values.Any(participant => ReferenceEquals(participant.Session, session)))
 				InvalidateMeshCheck("session_changed");
 			return Task.CompletedTask;
 		});
 
-		public Task<bool?> GetFullMeshCheckResult(long checkID) => RunExclusiveAsync(() =>
+		public Task<bool?> GetValidatedMeshCheckResultAsync(long checkID) => RunExclusiveAsync(() =>
 		{
-			ValidateMeshOwnership();
+			EnsureMeshCheckIsCurrentLocked();
 			return Task.FromResult(checkID == FullMeshCheckID && checkID != 0
 				? LastFullMeshConnectivityCheckOutcome : (bool?)false);
 		});
@@ -373,7 +373,7 @@ namespace GenOnlineService
 			m_FullMeshConnecting = new();
 			m_bCurrentAttemptHasLegacyResponse = false;
 			TimeStartFullMeshChecks = Environment.TickCount64;
-			m_TimeNextFullMeshSnapshotRequest = TimeStartFullMeshChecks + FullMeshCheckSettings.SnapshotIntervalMS;
+			m_TimeNextFullMeshSnapshotRequest = TimeStartFullMeshChecks + FullMeshCheckSettings.SnapshotIntervalMs;
 		}
 
 		private bool IsFullMeshPairStillConnecting(Int64 userA, Int64 userB)
@@ -464,11 +464,11 @@ namespace GenOnlineService
 			}
 		}
 
-		public Task StoreFullMeshConnectivityResponse(UserSession source, UserWebSocketInstance socket,
+		public Task StoreMeshResponseAsync(UserSession source, UserWebSocketInstance socket,
 			WebSocketMessage_FullMeshConnectivityCheckResponseFromUser response) => RunExclusiveAsync(() =>
 		{
 			// Legacy zero IDs cannot distinguish successive checks on the same socket.
-			if (!ValidateMeshOwnership() || !PendingFullMeshConnectivityChecks || m_TimeToRetryFullMeshChecks != -1
+			if (!EnsureMeshCheckIsCurrentLocked() || !PendingFullMeshConnectivityChecks || m_TimeToRetryFullMeshChecks != -1
 				|| !m_MeshParticipants.TryGetValue(source.m_UserID, out var participant)
 				|| !ReferenceEquals(participant.Session, source) || !ReferenceEquals(participant.Socket, socket)
 				|| !FullMeshCheckProtocol.MatchesCurrentAttempt(response, FullMeshCheckID, FullMeshCheckAttempt))
@@ -492,7 +492,7 @@ namespace GenOnlineService
 		// Must only be called while holding m_LobbyGate (via RunExclusiveAsync).
 		private void ProcessPendingFullMeshConnectivityChecksInternal()
 		{
-			if (!ValidateMeshOwnership() || !PendingFullMeshConnectivityChecks) return;
+			if (!EnsureMeshCheckIsCurrentLocked() || !PendingFullMeshConnectivityChecks) return;
 			if (m_TimeToRetryFullMeshChecks != -1)
 			{
 				if (Environment.TickCount64 < m_TimeToRetryFullMeshChecks) return;
@@ -510,12 +510,12 @@ namespace GenOnlineService
 			bool disabled = Program.g_Config?.GetSection("Core").GetValue<bool>("disable_full_mesh_check") == true;
 			bool allReported = m_MeshParticipants.Keys.All(FullMeshConnectivityChecks.ContainsKey);
 			bool complete = disabled || (allReported && missing.Count == 0);
-			bool elapsed = Environment.TickCount64 - TimeStartFullMeshChecks >= FullMeshCheckSettings.AttemptWindowMS;
-			if (!complete && !elapsed)
+			bool attemptTimedOut = Environment.TickCount64 - TimeStartFullMeshChecks >= FullMeshCheckSettings.AttemptWindowMs;
+			if (!complete && !attemptTimedOut)
 			{
 				if (Environment.TickCount64 >= m_TimeNextFullMeshSnapshotRequest)
 				{
-					m_TimeNextFullMeshSnapshotRequest = Environment.TickCount64 + FullMeshCheckSettings.SnapshotIntervalMS;
+					m_TimeNextFullMeshSnapshotRequest = Environment.TickCount64 + FullMeshCheckSettings.SnapshotIntervalMs;
 					SendFullMeshConnectivityCheckRequestToMembers();
 				}
 				return;
@@ -525,7 +525,7 @@ namespace GenOnlineService
 			{
 				++FullMeshCheckAttempt;
 				RestartSignallingForMissingConnections(missing.Where(connection => !IsFullMeshPairStillConnecting(connection.source_user_id, connection.target_user_id)).ToList());
-				m_TimeToRetryFullMeshChecks = Environment.TickCount64 + FullMeshCheckSettings.RetryDelayMS;
+				m_TimeToRetryFullMeshChecks = Environment.TickCount64 + FullMeshCheckSettings.RetryDelayMs;
 				return;
 			}
 			CompleteMeshCheck(complete, complete ? null : allReported ? "missing_connections" : "timeout", disabled ? new() : missing);
@@ -885,8 +885,8 @@ public async Task FinalizeACChecks()
 
 		// Runs under the per-lobby gate: this mutates slot state and previously ran unguarded,
 		// racing against AddMember/RemoveMemberAsync/other slot updates. Sequential with (never nested
-		// inside) StartFullMeshConnectivityCheck's own gate use - callers await this first and then
-		// await StartFullMeshConnectivityCheck as a separate gated operation, so the gate is never
+		// inside) StartMeshCheckAsync's own gate use - callers await this first and then
+		// await StartMeshCheckAsync as a separate gated operation, so the gate is never
 		// re-entered.
 		public async Task CloseOpenSlots()
 		{
