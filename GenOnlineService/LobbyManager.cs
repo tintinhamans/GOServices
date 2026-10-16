@@ -1086,7 +1086,7 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal static async Task<LobbyMembershipStatus> TransferMember(Lobby destination, IReadOnlyCollection<Lobby> sources,
+		internal static async Task<LobbyMembershipStatus> TransferMemberAsync(Lobby destination, IReadOnlyCollection<Lobby> sources,
 			JoinLobbyCommand command, UserSession session, string displayName, UserLobbyPreferences preferences)
 		{
 			var locked = sources.Append(destination).Distinct().OrderBy(lobby => lobby.LobbyID).ToArray();
@@ -1120,7 +1120,7 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal Task<bool> CompleteIfEmpty(long? expectedOwner = null, bool setupOnly = false) =>
+		internal Task<bool> TryMarkCompleteIfEmptyAsync(long? expectedOwner = null, bool setupOnly = false) =>
 			RunExclusiveAsync(() =>
 			{
 				if ((expectedOwner.HasValue && Owner != expectedOwner.Value) || (setupOnly && State != ELobbyState.GAME_SETUP)
@@ -1930,7 +1930,7 @@ public async Task FinalizeACChecks()
 			foreach (Lobby lobbyToRemove in lstLobbiesToRemove)
 			{
                 // remove it, also commit it + update leaderboard
-                if (await lobbyToRemove.CompleteIfEmpty()) await DeleteLobby(lobbyToRemove);
+                if (await lobbyToRemove.TryMarkCompleteIfEmptyAsync()) await DeleteLobby(lobbyToRemove);
             }
 		}
 
@@ -1955,7 +1955,7 @@ public async Task FinalizeACChecks()
 
 				try
 				{
-					if (await lobbyToDestroy.CompleteIfEmpty()) await DeleteLobby(lobbyToDestroy);
+					if (await lobbyToDestroy.TryMarkCompleteIfEmptyAsync()) await DeleteLobby(lobbyToDestroy);
 				}
 				catch (Exception ex)
 				{
@@ -2030,7 +2030,7 @@ public async Task FinalizeACChecks()
 		private async Task CleanupUserLobbiesNotStartedAsync(Int64 userID)
 		{
 			foreach (var lobby in GetPlayerOwnedLobbies(userID))
-				if (await lobby.CompleteIfEmpty(userID, setupOnly: true)) await DeleteLobby(lobby);
+				if (await lobby.TryMarkCompleteIfEmptyAsync(userID, setupOnly: true)) await DeleteLobby(lobby);
 		}
 
 		public List<Lobby> GetAllLobbies(Int16 selectedRoomID, bool bIncludePassword, bool bAllowInSetup, bool bAllowInGame, bool bAllowCompleted, bool bIncludeAllNetworkRooms)

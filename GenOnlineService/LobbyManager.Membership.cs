@@ -82,7 +82,7 @@ public partial class LobbyManager
 		var preferences = await Users.GetUserLobbyPreferences(db, command.UserID);
 		if (preferences == null) return new(LobbyMembershipStatus.PreferencesUnavailable);
 		var sources = m_dictLobbies.Values.Where(source => source.GetMemberFromUserID(command.UserID) != null).ToArray();
-		var status = await Lobby.TransferMember(lobby, sources, command, session, displayName, preferences);
+		var status = await Lobby.TransferMemberAsync(lobby, sources, command, session, displayName, preferences);
 		if (status != LobbyMembershipStatus.Success) return new(status);
 
 		var credentials = await membershipConnections.CreateRelayCredentialsAsync(command.UserID);
@@ -152,7 +152,7 @@ public partial class LobbyManager
 		foreach (Lobby lobby in m_dictLobbies.Values)
 			await lobby.RemoveMemberAsync(userID);
 	}
-	internal async Task<(string Username, string Token)> CreateLobbyRelayCredentials(UserSession session, long lobbyID)
+	internal async Task<(string Username, string Token)> CreateLobbyRelayCredentialsAsync(UserSession session, long lobbyID)
 	{
 		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
 		if (!IsCurrentSession(session) || session.IsRetired || session.currentLobbyID != lobbyID)
