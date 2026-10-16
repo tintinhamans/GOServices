@@ -1922,6 +1922,7 @@ public async Task FinalizeACChecks()
 			UInt16 maxCamHeight, UInt32 exe_crc, UInt32 ini_crc, ELobbyType lobbyType, EKnownAnticheatID anticheatID)
 		{
 			using var membership = await AcquireMembershipGateAsync(owningSession.m_UserID);
+			if (!IsCurrentSession(owningSession) || owningSession.IsRetired) return -1;
 			_logger.LogInformation("Creating lobby for user {UserId}", owningSession.m_UserID);
 			// cant own two lobbies at once, unless in gameplay
 			await CleanupUserLobbiesNotStartedAsync(owningSession.m_UserID);
@@ -1979,7 +1980,7 @@ public async Task FinalizeACChecks()
 			return m_dictLobbies.Count;
 		}
 
-		public async Task CleanupUserLobbiesNotStartedAsync(Int64 UserID)
+		private async Task CleanupUserLobbiesNotStartedAsync(Int64 UserID)
 		{
 			List<Lobby> ownedLobbies = GetPlayerOwnedLobbies(UserID);
 			foreach (Lobby ownedLobby in ownedLobbies)

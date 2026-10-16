@@ -385,10 +385,15 @@ namespace GenOnlineService
 				AppMetrics.RecordWebSocketConnections(entry.Key, entry.Value.Count);
 			}
 		}
+		public static Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
+		{
+			return ServiceLocator.Services.GetRequiredService<LobbyManager>().OpenSessionAsync(_db, sessionType, bIsReconnect, ownerID, client_id, ipAddr, strContinent, strCountry, dLatitude, dLongitude, bIsAdmin);
+		}
 
-		public static async Task<UserWebSocketInstance> CreateSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
+		internal static async Task<UserWebSocketInstance> InstallSession(AppDbContext _db, EUserSessionType sessionType, bool bIsReconnect, Int64 ownerID, KnownClients.EKnownClients client_id, string ipAddr, string strContinent, string strCountry, double dLatitude, double dLongitude, bool bIsAdmin)
 		{
 			string strDisplayName = await Database.Users.GetDisplayName(_db, ownerID);
+			await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
 
 			// if we have cache data, that means its a reconnect, noraml connections go through login flows which reset cache data
 			UserSession? userCacheData = WebSocketManager.GetSessionFromUser(ownerID, sessionType);
@@ -441,13 +446,6 @@ namespace GenOnlineService
 
 				// how many other sessions do they have online?
 				bool bIsFirstSessionForUser = WebSocketManager.GetAllDataFromUser(ownerID).Count == 0;
-
-				// kill any existing sessions for this user of same session type
-				if (m_dictWebsockets[sessionType].TryGetValue(ownerID, out UserWebSocketInstance? existingSession))
-				{
-					s_log.LogDebug("Killing existing session for {UserId} ({DisplayName})", ownerID, strDisplayName);
-					await DeleteSession(ownerID, sessionType, existingSession, !bIsReconnect);
-				}
 
 				// get and cache social container
 				UserSocialContainer socialContainer = new();
@@ -503,8 +501,6 @@ namespace GenOnlineService
 			m_dictWebsockets[sessionType][ownerID] = newSess;
 			RecordConnectionSnapshot();
 
-			// update last login and last ip
-			await Database.Users.UpdateLastLoginData(_db, ownerID, ipAddr);
 
 			// TODO_EFCORE: Optimize this, dont iterate all the time
 			int numSessions = WebSocketManager.GetNumberOfUsersOnline();
@@ -602,149 +598,48 @@ namespace GenOnlineService
 			}
 
 			foreach (var userData in lstCacheEntriesToDestroy)
-			{
-				// A reconnect between the snapshot above and now would have replaced this user's
-				// session with a live one; only clear if the SAME session object is still registered
-				// and still abandoned+expired, so a fresh reconnect never has its live session torn
-				// down (kicked from its lobby, deregistered from matchmaking) by a stale sweep entry.
-				UserSession? currentSession = GetSessionFromUser(userData.UserID, userData.SessionType);
-				if (!ShouldStillClearAbandonedSession(currentSession, userData.Session))
-				{
-					continue;
-				}
-
-				await ClearDataFromUser(userData.UserID, userData.SessionType);
-			}
+				await ServiceLocator.Services.GetRequiredService<LobbyManager>().ExpireSessionAsync(userData.Session);
 		}
 
-		public static async Task DeleteSession(Int64 user_id, EUserSessionType sessionType, UserWebSocketInstance? oldWS, bool bShouldInvalidatePlayerCacheToBlockReconnect)
+		public static Task DeleteSession(Int64 userID, EUserSessionType sessionType, UserWebSocketInstance? oldWS, bool invalidateCache, UserSession? expectedSession = null)
 		{
-			UserSession? sourceData = WebSocketManager.GetSessionFromUser(user_id, sessionType);
-			SharedUserData? sourceSharedData = WebSocketManager.GetSharedDataForUser(user_id);
+			var session = expectedSession ?? oldWS?.OwnerSession ?? GetSessionFromUser(userID, sessionType);
+			return ServiceLocator.Services.GetRequiredService<LobbyManager>().DisconnectSessionAsync(session, oldWS, invalidateCache);
+		}
 
-			bool bIsStaleSocket = false;
-
-			if (oldWS != null)
-			{
-				// has this websocket already been superseded by a newer connection for the same user? if so it is a
-				// stale/zombie socket and must not be allowed to abandon or tear down the live session
-				if (m_dictWebsockets[sessionType].TryGetValue(user_id, out UserWebSocketInstance? currentWS))
-				{
-					bIsStaleSocket = !ReferenceEquals(currentWS, oldWS);
-				}
-
-				try
-				{
-					// dont remove by ID, user could have re-opened another websocket open via reconnection, remove by instance, if its not there, thats OK, it was already closed and the new instance is a reconnect
-					var item = m_dictWebsockets[sessionType].First(kvp => kvp.Value == oldWS); // safe to lookup by sessionType here since we only ever remove old WS of the same type
-					m_dictWebsockets[sessionType].Remove(item.Key, out UserWebSocketInstance? destroyedSess);
-
-					if (destroyedSess != null)
-					{
-						await destroyedSess.CloseAsync(WebSocketCloseStatus.NormalClosure, "User signed in from another point of presence [A]");
-					}
-				}
-				catch
-				{
-
-				}
-
-				if (bIsStaleSocket)
-				{
-					// nothing else to do - the user is still connected on the newer socket
-					await oldWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "Superseded by a newer connection");
-					return;
-				}
-			}
-
-			if (bShouldInvalidatePlayerCacheToBlockReconnect)
-			{
-				// NOTE: ClearDataFromUser owns the shared data ref count decrement (and GC) for this path - doing it
-				// again here would drop the count twice for a single disconnect and tear down the shared data while
-				// the user still has other live sessions
-				await WebSocketManager.ClearDataFromUser(user_id, sessionType);
-			}
-			else
-			{
-				// mark it as abandoned for now to start the expiration timer
-				if (sourceData != null)
-				{
-					sourceData.MarkAbandoned();
-
-					// If the player was in an active game when their connection dropped, record the
-					// abandon time NOW (before any lobby-structure cleanup runs).  This timestamp is
-					// the authoritative "who quit first" signal used by DetermineLobbyWinnerIfNotPresent,
-					// and must be captured here rather than in RemoveMemberAsync, because RemoveMemberAsync may
-					// execute much later (e.g. 30 s after the first abandonment) or at an unexpected
-					// time (e.g. when the other player reconnects with a fresh session and their old
-					// session is forcibly evicted, causing them to appear as "last to leave" even
-					// though they stayed in the game longer than the opponent who quit first).
-					try
-					{
-						var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-						if (sourceData.currentLobbyID != -1)
-						{
-							Lobby? ingameLobby = lobbyManager.GetLobby(sourceData.currentLobbyID);
-							if (ingameLobby != null && ingameLobby.State == ELobbyState.INGAME)
-							{
-								ingameLobby.RecordPlayerIngameAbandon(user_id);
-							}
-							else
-							{
-								s_log.LogWarning("DeleteSession(false): skipped RecordPlayerIngameAbandon for user {UserId}, lobby={LobbyId} found={LobbyFound} state={LobbyState}",
-								user_id, sourceData.currentLobbyID, ingameLobby != null, ingameLobby?.State);
-							}
-						}
-						else
-						{
-							s_log.LogWarning("DeleteSession(false): skipped RecordPlayerIngameAbandon for user {UserId}, currentLobbyID==-1 (session has no lobby)", user_id);
-						}
-					}
-					catch (Exception ex)
-					{
-						s_log.LogWarning(ex, "Failed to record in-game abandon for user {UserId}", user_id);
-					}
-				}
-			}
-
-			// NOTE: They only went offline if ref count became 0, otherwise they're still online somewhere else
-			if (sourceData != null && sourceSharedData != null && sourceSharedData.NeedsGC())
-			{
-				// TODO_SOCIAL: Move this to a class
-				// inform any friends who are online that this person just came online
-				WebSocketMessage_Social_FriendStatusChanged friendStatusChangedEvent = new();
-				friendStatusChangedEvent.msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED;
-				friendStatusChangedEvent.display_name = sourceSharedData.m_strDisplayName;
-				friendStatusChangedEvent.online = false;
-				byte[] bytesJSON = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(friendStatusChangedEvent));
-
-				if (sourceData != null)
-				{
-					// friends are reciprocal so we can just iterate our friends
-					foreach (Int64 friendID in sourceSharedData.GetSocialContainer().Friends)
-					{
-						WebsocketHelper.SendToAllSessionsOfUser(friendID, bytesJSON);
-					}
-				}
-			}
-
-			int numSessions = WebSocketManager.GetNumberOfUsersOnline(); ;
-			Console.Title = String.Format("GenOnline - {0} players", numSessions);
-
-			try
-			{
-				if (oldWS != null)
-				{
-					// Close the WS directly, dont rely on session data as it may be linked to something else at this point
-					await oldWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "Session being deleted");
-				}
-			}
-			catch
-			{
-
-			}
-
+		internal static UserWebSocketInstance? DetachSocket(UserSession session)
+		{
+			var sockets = m_dictWebsockets[session.GetSessionType()];
+			if (!sockets.TryGetValue(session.m_UserID, out var socket) || !ReferenceEquals(socket.OwnerSession, session)) return null;
+			if (!sockets.TryRemove(new KeyValuePair<long, UserWebSocketInstance>(session.m_UserID, socket))) return null;
 			RecordConnectionSnapshot();
+			return socket;
+		}
+
+		internal static bool RemoveSessionData(UserSession session)
+		{
+			if (!m_dictUserSessions[session.GetSessionType()].TryRemove(new KeyValuePair<long, UserSession>(session.m_UserID, session)))
+				return false;
+			session.ReleasePendingWebsocketSendAccounting();
+			if (m_dictSharedUserData.TryGetValue(session.m_UserID, out var shared))
+			{
+				shared.DecrementRefCount();
+				if (shared.NeedsGC())
+				{
+					m_dictSharedUserData.TryRemove(new KeyValuePair<long, SharedUserData>(session.m_UserID, shared));
+					var message = new WebSocketMessage_Social_FriendStatusChanged
+					{
+						msg_id = (int)EWebSocketMessageID.SOCIAL_FRIEND_ONLINE_STATUS_CHANGED,
+						display_name = shared.m_strDisplayName,
+						online = false
+					};
+					byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+					foreach (long friendID in shared.GetSocialContainer().Friends)
+						WebsocketHelper.SendToAllSessionsOfUser(friendID, payload);
+				}
+			}
+			Console.Title = $"GenOnline - {GetNumberOfUsersOnline()} players";
+			return true;
 		}
 
 		/*
@@ -764,7 +659,7 @@ namespace GenOnlineService
 		// TODO_EFCORE: Just use a weakref to the websocket from the user session instead of lookups
 		public static UserWebSocketInstance? GetWebSocketForSession(UserSession session)
 		{
-			if (m_dictWebsockets[session.GetSessionType()].TryGetValue(session.m_UserID, out UserWebSocketInstance? retVal))
+			if (m_dictWebsockets[session.GetSessionType()].TryGetValue(session.m_UserID, out UserWebSocketInstance? retVal) && ReferenceEquals(retVal.OwnerSession, session))
 			{
 				return retVal;
 			}
@@ -867,7 +762,7 @@ namespace GenOnlineService
 						await userSession.FlushWebsocketSendsAsync(TimeSpan.FromSeconds(2));
 					}
 
-					await DeleteSession(userID, userSession.GetSessionType(), oldWS, true);
+					await DeleteSession(userID, userSession.GetSessionType(), oldWS, true, userSession);
 				}
 				catch (Exception ex)
 				{
@@ -876,44 +771,10 @@ namespace GenOnlineService
 			}
 		}
 
-		public static async Task<bool> ClearDataFromUser(Int64 userID, EUserSessionType sessionType)
+		public static Task<bool> ClearDataFromUser(Int64 userID, EUserSessionType sessionType)
 		{
-			// NOTE: This is when a player is truly disconnected and we can destroy session, remove form lobby etc, websocket disconnect doesnt mean that because the clietn reconnects
-			try
-			{
-				UserSession? userData = null;
-
-				if (m_dictUserSessions[sessionType].ContainsKey(userID))
-				{
-					userData = m_dictUserSessions[sessionType][userID];
-				}
-				await SessionHelpers.FullyDestroyPlayerSession(userID, userData, true);
-
-				// decrement ref count on shared data
-				if (m_dictSharedUserData.TryGetValue(userID, out SharedUserData? sharedData))
-				{
-					sharedData.DecrementRefCount();
-					if (sharedData.NeedsGC()) // cleanup if necessary
-					{
-						m_dictSharedUserData.Remove(userID, out var removedSharedData);
-					}
-				}
-				else
-				{
-					s_log.LogWarning("Could not find shared data for user {UserId} when deleting session", userID);
-				}
-			}
-			catch
-			{
-
-			}
-
-			bool removed = m_dictUserSessions[sessionType].Remove(userID, out var itemRemoved);
-			if (removed && itemRemoved != null)
-			{
-				itemRemoved.ReleasePendingWebsocketSendAccounting();
-			}
-			return removed;
+			var session = GetSessionFromUser(userID, sessionType);
+			return ServiceLocator.Services.GetRequiredService<LobbyManager>().ClearSessionAsync(session);
 		}
 
 
@@ -1196,6 +1057,10 @@ namespace GenOnlineService
 	public class UserSession
 	{
 		private static readonly ILogger s_log = AppLog.For(typeof(UserSession));
+
+		private int retired;
+		internal bool IsRetired => Volatile.Read(ref retired) != 0;
+		internal void Retire() => Interlocked.Exchange(ref retired, 1);
 
 		public Int64 m_UserID = -1;
 		
@@ -1554,7 +1419,10 @@ namespace GenOnlineService
 		}
 
 		private WebSocket? m_SockInternal = null;
+		private readonly object transportLock = new();
+		private bool closed;
 		private readonly UserSession m_OwnerSession;
+		internal UserSession OwnerSession => m_OwnerSession;
 		private readonly CancellationTokenSource m_sendLoopStop = new CancellationTokenSource();
 		private Task m_sendLoop = Task.CompletedTask;
 
@@ -1567,8 +1435,16 @@ namespace GenOnlineService
 
 		public void AttachWebsocket(WebSocket sock)
 		{
-			m_SockInternal = sock;
-			m_sendLoop = Task.Run(RunSendLoop);
+			lock (transportLock)
+			{
+				if (closed)
+				{
+					sock.Abort();
+					return;
+				}
+				m_SockInternal = sock;
+				m_sendLoop = Task.Run(RunSendLoop);
+			}
 		}
 
 		public bool AbortIfOpen()
@@ -1644,6 +1520,7 @@ namespace GenOnlineService
 
 		public async Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription)
 		{
+			lock (transportLock) closed = true;
 			// stop reading the queue first so the next connection's send loop is the only reader
 			m_sendLoopStop.Cancel();
 
@@ -1695,38 +1572,6 @@ namespace GenOnlineService
 			return false;
 		}
 
-		public static async Task FullyDestroyPlayerSession(Int64 user_id, UserSession? userData, bool bMigrateLobbyIfPresent)
-		{
-			// NOTE: Dont assume userData is valid, use user_id for user id
-			s_log.LogInformation("FullyDestroyPlayerSession for user {UserId}", user_id);
-
-			// invalidate any TURN credentials
-			TURNCredentialManager.DeleteCredentialsForUser(user_id);
-
-			// TODO: Implement single point of presence? gets dicey if multiple logins
-			// TODO: Dont destroy this, just mark inactive/offline, we use this as a saved credential system
-
-			// session tied to this token (keep other ones attached to user_id, could be other machines)
-			// TODO_JWT: Remove table fully + set logged out
-			//await m_Inst.Query("DELETE FROM sessions WHERE user_id={0} AND session_type={1};", user_id, (int)ESessionType.Game);
-
-			// leave any lobby
-			s_log.LogInformation("User {UserId} leaving any lobby (session teardown)", user_id);
-
-			var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-			await lobbyManager.LeaveAllLobbiesAsync(user_id);
-
-			await lobbyManager.CleanupUserLobbiesNotStartedAsync(user_id);
-
-			// remove from any matchmaking
-			if (userData != null)
-			{
-				await MatchmakingManager.DeregisterPlayerAsync(userData);
-			}
-
-			// TODO: Client needs to handle this... itll start returning 404
-		}
-
 		public async static Task SetUsedLoggedIn(Int64 userID, KnownClients.EKnownClients clientID, EUserSessionType sessionType)
 		{
 			// TODO_EFCORE: website uses this index as 1 (60hz) to 0 (30hz), update it to use new enum + support new clients, also need to update DB to match
@@ -1743,7 +1588,7 @@ namespace GenOnlineService
 				s_log.LogInformation("Found duplicate session for user {UserId}", userID);
 
 				UserWebSocketInstance? oldWS = GenOnlineService.WebSocketManager.GetWebSocketForSession(sess);
-				await GenOnlineService.WebSocketManager.DeleteSession(userID, sessionType, oldWS, false);
+				await GenOnlineService.WebSocketManager.DeleteSession(userID, sessionType, oldWS, false, sess);
 			}
 		}
 	}
@@ -2841,7 +2686,8 @@ namespace GenOnlineService
 					try
 					{
 						string strURI = String.Format("https://rtc.live.cloudflare.com/v1/turn/keys/{0}/credentials/{1}/revoke", TurnKey, strTURNUsername);
-						HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
+						using HttpResponseMessage response = await client.PostAsync(strURI, requestContent);
+						response.EnsureSuccessStatusCode();
 					}
 					catch
 					{

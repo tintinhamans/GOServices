@@ -78,7 +78,7 @@ public partial class LobbyManager
 		var admission = await lobby.CheckJoinAdmissionAsync(command);
 		if (admission != LobbyMembershipStatus.Success) return new(admission);
 		var session = membershipConnections.GetSession(command.UserID, command.SessionType);
-		if (session == null) return new(LobbyMembershipStatus.SessionUnavailable);
+		if (session == null || session.IsRetired) return new(LobbyMembershipStatus.SessionUnavailable);
 
 		await LeaveMembershipsAsync(command.UserID);
 		await using var db = await membershipDbFactory.CreateDbContextAsync();
@@ -134,6 +134,7 @@ public partial class LobbyManager
 	internal async Task RemoveMatchmakingMemberAsync(Lobby lobby, LobbyMember member, bool sendPeerTeardown = false)
 	{
 		using var membership = await AcquireMembershipGateAsync(member.UserID);
+		if (!member.GetSession().TryGetTarget(out var session) || !IsCurrentSession(session) || session.IsRetired) return;
 		if (sendPeerTeardown) lobby.SendPeerTeardownToDepartingMember(member);
 		await lobby.RemoveMemberAsync(member.UserID, member);
 	}
@@ -149,4 +150,12 @@ public partial class LobbyManager
 		foreach (Lobby lobby in m_dictLobbies.Values)
 			await lobby.RemoveMemberAsync(userID);
 	}
+	internal async Task<(string Username, string Token)> CreateLobbyRelayCredentials(UserSession session, long lobbyID)
+	{
+		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
+		if (!IsCurrentSession(session) || session.IsRetired || session.currentLobbyID != lobbyID)
+			return ("", "");
+		return await membershipConnections.CreateRelayCredentialsAsync(session.m_UserID);
+	}
+
 }
