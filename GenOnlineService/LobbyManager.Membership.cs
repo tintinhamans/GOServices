@@ -41,7 +41,7 @@ public enum LobbyMembershipStatus
 
 public sealed record JoinLobbyCommand(long LobbyID, long UserID, EUserSessionType SessionType,
 	ushort PreferredPort, bool HasMap, EKnownAnticheatID AnticheatID, string? Password);
-public sealed record LeaveLobbyCommand(long UserID, EUserSessionType SessionType);
+public sealed record LeaveLobbyCommand(long LobbyID, long UserID, EUserSessionType SessionType);
 public sealed record KickLobbyMemberCommand(long LobbyID, long ActorUserID, long? TargetUserID);
 public sealed record JoinLobbyResult(LobbyMembershipStatus Status, string TurnUsername = "", string TurnToken = "");
 
@@ -74,18 +74,15 @@ public partial class LobbyManager
 		if (command.UserID == -1 || !SessionHelpers.SessionTypeHasAccessTo(command.SessionType, ESessionAccessType.Gameplay))
 			return new(LobbyMembershipStatus.NoChange);
 
-		// Admission is checked again atomically with insertion.
-		var admission = await lobby.CheckJoinAdmissionAsync(command);
-		if (admission != LobbyMembershipStatus.Success) return new(admission);
 		var session = membershipConnections.GetSession(command.UserID, command.SessionType);
 		if (session == null || session.IsRetired) return new(LobbyMembershipStatus.SessionUnavailable);
 
-		await LeaveMembershipsAsync(command.UserID);
 		await using var db = await membershipDbFactory.CreateDbContextAsync();
 		var displayName = await Users.GetDisplayName(db, command.UserID);
 		var preferences = await Users.GetUserLobbyPreferences(db, command.UserID);
 		if (preferences == null) return new(LobbyMembershipStatus.PreferencesUnavailable);
-		var status = await lobby.JoinMemberAsync(command, session, displayName, preferences);
+		var sources = m_dictLobbies.Values.Where(source => source.GetMemberFromUserID(command.UserID) != null).ToArray();
+		var status = await Lobby.TransferMember(lobby, sources, command, session, displayName, preferences);
 		if (status != LobbyMembershipStatus.Success) return new(status);
 
 		var credentials = await membershipConnections.CreateRelayCredentialsAsync(command.UserID);
@@ -97,9 +94,14 @@ public partial class LobbyManager
 		if (command.UserID == -1 || !SessionHelpers.SessionTypeHasAccessTo(command.SessionType, ESessionAccessType.Gameplay))
 			return false;
 		using var membership = await AcquireMembershipGateAsync(command.UserID);
-		// DELETE historically leaves any lobby, irrespective of its route ID.
-		await LeaveMembershipsAsync(command.UserID);
-		await ClearSessionMembershipStateAsync(command.UserID, command.SessionType);
+		var lobby = GetLobby(command.LobbyID);
+		if (lobby == null) return false;
+		var removed = await lobby.RemoveMemberAsync(command.UserID);
+		if (removed == null) return false;
+		var session = membershipConnections.GetSession(command.UserID, command.SessionType);
+		if (session != null && session.currentLobbyID == command.LobbyID
+			&& removed.GetSession().TryGetTarget(out var memberSession) && ReferenceEquals(session, memberSession))
+			await ClearSessionMembershipStateAsync(command.UserID, command.SessionType);
 		return true;
 	}
 

@@ -972,8 +972,10 @@ public async Task FinalizeACChecks()
 						Owner = member.UserID;
 
 						member.UpdateSlotIndex(0);
-						Members[0] = member;
-						Members[oldSlot] = new LobbyMember(this, null, -1, String.Empty, String.Empty, 0, -1, -1, -1, EPlayerType.SLOT_OPEN, oldSlot, true);
+						var migrated = (LobbyMember[])Members.Clone();
+						migrated[0] = member;
+						migrated[oldSlot] = new LobbyMember(this, null, -1, String.Empty, String.Empty, 0, -1, -1, -1, EPlayerType.SLOT_OPEN, oldSlot, true);
+						Members = migrated;
 
 						member.SetReadyState(true);
 						DirtyRetransmitLobbyList();
@@ -1084,28 +1086,65 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal Task<LobbyMembershipStatus> CheckJoinAdmissionAsync(JoinLobbyCommand command) =>
-			RunExclusiveAsync(() => Task.FromResult(ValidateJoin(command)));
+		internal static async Task<LobbyMembershipStatus> TransferMember(Lobby destination, IReadOnlyCollection<Lobby> sources,
+			JoinLobbyCommand command, UserSession session, string displayName, UserLobbyPreferences preferences)
+		{
+			var locked = sources.Append(destination).Distinct().OrderBy(lobby => lobby.LobbyID).ToArray();
+			int acquired = 0;
+			try
+			{
+				// The caller holds the user's membership gate. All multi-lobby operations use
+				// ascending IDs; only synchronous state changes and queue writes follow.
+				foreach (var lobby in locked)
+				{
+					await lobby.m_LobbyGate.WaitAsync();
+					++acquired;
+				}
+				var admission = destination.ValidateJoin(command);
+				if (admission != LobbyMembershipStatus.Success) return admission;
+				var added = destination.AddMemberLocked(session, displayName, command.PreferredPort, command.HasMap, preferences);
+				if (added.Member == null) return added.Status;
+				// Destination admission and insertion must succeed before releasing old membership.
+				foreach (var source in sources)
+				{
+					if (ReferenceEquals(source, destination)) continue;
+					var member = source.GetMemberFromUserID(command.UserID);
+					if (member != null && source.RemoveMemberLocked(member)) source.PublishMemberRemoval(member);
+				}
+				destination.PublishMemberAddition(session, added.Member);
+				return LobbyMembershipStatus.Success;
+			}
+			finally
+			{
+				for (int index = acquired - 1; index >= 0; --index) locked[index].m_LobbyGate.Release();
+			}
+		}
 
-		internal Task<LobbyMembershipStatus> JoinMemberAsync(JoinLobbyCommand command, UserSession session, string displayName, UserLobbyPreferences preferences) =>
+		internal Task<bool> CompleteIfEmpty(long? expectedOwner = null, bool setupOnly = false) =>
 			RunExclusiveAsync(() =>
 			{
-				var admission = ValidateJoin(command);
-				return Task.FromResult(admission == LobbyMembershipStatus.Success
-					? AddMemberLocked(session, displayName, command.PreferredPort, command.HasMap, preferences)
-					: admission);
+				if ((expectedOwner.HasValue && Owner != expectedOwner.Value) || (setupOnly && State != ELobbyState.GAME_SETUP)
+					|| GetNumberOfHumans() != 0) return Task.FromResult(false);
+				State = ELobbyState.COMPLETE;
+				DirtyRetransmitLobbyList();
+				return Task.FromResult(true);
 			});
 
 		internal Task<LobbyMembershipStatus> AddCreatorAsync(UserSession session, string displayName, ushort preferredPort, UserLobbyPreferences preferences) =>
-			RunExclusiveAsync(() => Task.FromResult(AddMemberLocked(session, displayName, preferredPort, true, preferences)));
+			RunExclusiveAsync(() =>
+			{
+				var added = AddMemberLocked(session, displayName, preferredPort, true, preferences);
+				if (added.Member != null) PublishMemberAddition(session, added.Member);
+				return Task.FromResult(added.Status);
+			});
 
-		private LobbyMembershipStatus AddMemberLocked(UserSession playerSession, string strDisplayName, UInt16 userPreferredPort, bool bHasMap, UserLobbyPreferences lobbyPrefs)
+		private (LobbyMembershipStatus Status, LobbyMember? Member) AddMemberLocked(UserSession playerSession, string strDisplayName, UInt16 userPreferredPort, bool bHasMap, UserLobbyPreferences lobbyPrefs)
 		{
-			if (State != ELobbyState.GAME_SETUP) return LobbyMembershipStatus.NotInSetup;
-			if (GetMemberFromUserID(playerSession.m_UserID) != null) return LobbyMembershipStatus.AlreadyMember;
+			if (State != ELobbyState.GAME_SETUP) return (LobbyMembershipStatus.NotInSetup, null);
+			if (GetMemberFromUserID(playerSession.m_UserID) != null) return (LobbyMembershipStatus.AlreadyMember, null);
 
 			int openSlot = Array.FindIndex(Members, member => member.SlotState == EPlayerType.SLOT_OPEN);
-			if (openSlot < 0) return LobbyMembershipStatus.NoOpenSlot;
+			if (openSlot < 0) return (LobbyMembershipStatus.NoOpenSlot, null);
 			ushort slotIndex = (ushort)openSlot;
 
 			// QuickMatch applies social eligibility during matchmaking.
@@ -1115,9 +1154,9 @@ public async Task FinalizeACChecks()
 				if (ownerData != null)
 				{
 					var social = ownerData.GetSocialContainer();
-					if (social.Blocked.Contains(playerSession.m_UserID)) return LobbyMembershipStatus.BlockedByOwner;
+					if (social.Blocked.Contains(playerSession.m_UserID)) return (LobbyMembershipStatus.BlockedByOwner, null);
 					if (LobbyJoinability == ELobbyJoinability.FriendsOnly && !social.Friends.Contains(playerSession.m_UserID))
-						return LobbyMembershipStatus.FriendshipRequired;
+						return (LobbyMembershipStatus.FriendshipRequired, null);
 				}
 			}
 
@@ -1197,6 +1236,11 @@ public async Task FinalizeACChecks()
 
 			playerSession.UpdateSessionLobbyID(LobbyID);
 
+			return (LobbyMembershipStatus.Success, newMember);
+		}
+
+		private void PublishMemberAddition(UserSession playerSession, LobbyMember newMember)
+		{
 			// START NETWORK SIGNALLING
 			// send all existing player to new player and vice-versa
 			foreach (LobbyMember memberEntry in Members)
@@ -1231,7 +1275,7 @@ public async Task FinalizeACChecks()
 							existingPlayerMsg.msg_id = (int)EWebSocketMessageID.NETWORK_CONNECTION_START_SIGNALLING;
 							existingPlayerMsg.lobby_id = LobbyID;
 							existingPlayerMsg.user_id = playerSession.m_UserID;
-							existingPlayerMsg.preferred_port = userPreferredPort;
+							existingPlayerMsg.preferred_port = newMember.Port;
 							existingPlayerMsg.middleware_id = playerSession.GetMiddlewareID();
 							remoteSession.QueueWebsocketSend(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(existingPlayerMsg)));
 
@@ -1250,8 +1294,8 @@ public async Task FinalizeACChecks()
 			// Notify lobby members and room browsers.
 			DirtyRetransmitLobbyList();
 
-			s_log.LogInformation("User {UserId} joined lobby {LobbyId} in slot {SlotIndex}", playerSession.m_UserID, LobbyID, slotIndex);
-			return LobbyMembershipStatus.Success;
+			s_log.LogInformation("User {UserId} joined lobby {LobbyId} in slot {SlotIndex}", playerSession.m_UserID, LobbyID, newMember.SlotIndex);
+
 		}
 
 		public void SendPeerTeardownToDepartingMember(LobbyMember departingMember)
@@ -1285,7 +1329,7 @@ public async Task FinalizeACChecks()
 			}
 		}
 
-		internal async Task RemoveMemberAsync(long userID, LobbyMember? expectedMember = null)
+		internal async Task<LobbyMember?> RemoveMemberAsync(long userID, LobbyMember? expectedMember = null)
 		{
 			LobbyMember? removed = await RunExclusiveAsync(() =>
 			{
@@ -1294,6 +1338,7 @@ public async Task FinalizeACChecks()
 					&& RemoveMemberLocked(member) ? member : null);
 			});
 			if (removed != null) PublishMemberRemoval(removed);
+			return removed;
 		}
 
 		internal async Task<LobbyMembershipStatus> KickMemberAsync(KickLobbyMemberCommand command)
@@ -1305,6 +1350,8 @@ public async Task FinalizeACChecks()
 					return Task.FromResult(LobbyMembershipStatus.ActorNotMember);
 				if (Owner != command.ActorUserID)
 					return Task.FromResult(LobbyMembershipStatus.ActorNotHost);
+				if (command.TargetUserID == Owner)
+					return Task.FromResult(LobbyMembershipStatus.NoChange);
 				var member = command.TargetUserID.HasValue ? GetMemberFromUserID(command.TargetUserID.Value) : null;
 				if (member != null && RemoveMemberLocked(member)) removed = member;
 				return Task.FromResult(removed != null ? LobbyMembershipStatus.Success : LobbyMembershipStatus.NoChange);
@@ -1883,7 +1930,7 @@ public async Task FinalizeACChecks()
 			foreach (Lobby lobbyToRemove in lstLobbiesToRemove)
 			{
                 // remove it, also commit it + update leaderboard
-                await DeleteLobby(lobbyToRemove);
+                if (await lobbyToRemove.CompleteIfEmpty()) await DeleteLobby(lobbyToRemove);
             }
 		}
 
@@ -1908,7 +1955,7 @@ public async Task FinalizeACChecks()
 
 				try
 				{
-					await DeleteLobby(lobbyToDestroy);
+					if (await lobbyToDestroy.CompleteIfEmpty()) await DeleteLobby(lobbyToDestroy);
 				}
 				catch (Exception ex)
 				{
@@ -1980,16 +2027,10 @@ public async Task FinalizeACChecks()
 			return m_dictLobbies.Count;
 		}
 
-		private async Task CleanupUserLobbiesNotStartedAsync(Int64 UserID)
+		private async Task CleanupUserLobbiesNotStartedAsync(Int64 userID)
 		{
-			List<Lobby> ownedLobbies = GetPlayerOwnedLobbies(UserID);
-			foreach (Lobby ownedLobby in ownedLobbies)
-			{
-				if (ownedLobby.State == ELobbyState.GAME_SETUP) // only those in setup, in game games can continue
-				{
-					await DeleteLobby(ownedLobby);
-				}
-			}
+			foreach (var lobby in GetPlayerOwnedLobbies(userID))
+				if (await lobby.CompleteIfEmpty(userID, setupOnly: true)) await DeleteLobby(lobby);
 		}
 
 		public List<Lobby> GetAllLobbies(Int16 selectedRoomID, bool bIncludePassword, bool bAllowInSetup, bool bAllowInGame, bool bAllowCompleted, bool bIncludeAllNetworkRooms)
