@@ -31,8 +31,10 @@ public partial class LobbyManager
 		var previous = membershipConnections.GetSession(userID, sessionType);
 		if (!reconnect && previous != null) await DestroySessionAsync(previous);
 		if (reconnect && (previous == null || previous.IsRetired)) return null;
-		return await WebSocketManager.InstallSession(db, sessionType, reconnect, userID, clientID,
+		var installed = await WebSocketManager.InstallSession(db, sessionType, reconnect, userID, clientID,
 			ipAddress, continent, country, latitude, longitude, admin);
+		if (reconnect && previous != null) await InvalidateSessionMesh(previous);
+		return installed;
 	}
 
 	internal async Task DisconnectSessionAsync(UserSession? session, UserWebSocketInstance? socket, bool destroySession)
@@ -46,6 +48,7 @@ public partial class LobbyManager
 				else
 				{
 					WebSocketManager.DetachSocket(session);
+					await InvalidateSessionMesh(session);
 					session.MarkAbandoned();
 					var lobby = GetLobby(session.currentLobbyID);
 					if (lobby?.State == ELobbyState.INGAME) lobby.RecordPlayerIngameAbandon(session.m_UserID);
@@ -79,6 +82,7 @@ public partial class LobbyManager
 		{
 			if (gameplay)
 			{
+				await InvalidateSessionMesh(session);
 				await MatchmakingManager.DetachSessionAsync(session);
 				await LeaveMembershipsAsync(session.m_UserID);
 				await CleanupUserLobbiesNotStartedAsync(session.m_UserID);
@@ -110,6 +114,30 @@ public partial class LobbyManager
 				}
 			}
 		}
+	}
+
+	private async Task InvalidateSessionMesh(UserSession session)
+	{
+		if (!SessionHelpers.SessionTypeHasAccessTo(session.GetSessionType(), ESessionAccessType.Gameplay)) return;
+		var lobby = GetLobby(session.currentLobbyID);
+		if (lobby != null) await lobby.InvalidateMeshForSession(session);
+	}
+
+	internal async Task StartMeshCheckAsync(UserSession session, UserWebSocketInstance socket)
+	{
+		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
+		if (!IsCurrentSession(session) || session.IsRetired || !ReferenceEquals(WebSocketManager.GetWebSocketForSession(session), socket)) return;
+		var lobby = GetLobby(session.currentLobbyID);
+		if (lobby != null) await lobby.StartFullMeshConnectivityCheck(session, socket);
+	}
+
+	internal async Task StoreMeshResponseAsync(UserSession session, UserWebSocketInstance socket,
+		WebSocketMessage_FullMeshConnectivityCheckResponseFromUser response)
+	{
+		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
+		if (!IsCurrentSession(session) || session.IsRetired || !ReferenceEquals(WebSocketManager.GetWebSocketForSession(session), socket)) return;
+		var lobby = GetLobby(session.currentLobbyID);
+		if (lobby != null) await lobby.StoreFullMeshConnectivityResponse(session, socket, response);
 	}
 
 	internal async Task CancelMatchmakingAsync(UserSession session)
