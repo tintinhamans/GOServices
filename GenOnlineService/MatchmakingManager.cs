@@ -1909,18 +1909,17 @@ static class MatchmakingManager
 			return;
 		}
 
-		bool bCancellationRejected;
+		MatchmakingDetachment detached;
 		bool wasQueued;
 		await plr.MatchmakingStateLock.WaitAsync();
 		try
 		{
-			// A duplicate registration must not leave the player queued twice or in two buckets.
 			wasQueued = plr.MatchmakingStartedTimestamp != 0;
 			plr.IsRegisteredForMatchmaking = false;
 			RemovePendingSession(plr);
-			bCancellationRejected = await RemovePlayerFromAllBuckets(plr);
+			detached = RemovePlayerFromAllBuckets(plr);
 
-			if (!bCancellationRejected)
+			if (!detached.CancellationRejected)
 			{
 				if (wasQueued)
 				{
@@ -1941,7 +1940,11 @@ static class MatchmakingManager
 			plr.MatchmakingStateLock.Release();
 		}
 
-		if (bCancellationRejected)
+		var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
+		foreach (var entry in detached.Members)
+			await lobbyManager.RemoveMatchmakingMemberAsync(entry.Lobby, entry.Member);
+
+		if (detached.CancellationRejected)
 		{
 			activity?.SetTag("matchmaking.outcome", "start_in_progress");
 			s_log.LogWarning("User {UserId} could not restart matchmaking because the game is starting", plr.m_UserID);
@@ -1954,67 +1957,55 @@ static class MatchmakingManager
         await SendMatchmakingMessage(plr, "Started matchmaking... Searching for players...");
 	}
 
-	private static async Task<bool> RemovePlayerFromAllBuckets(UserSession plr)
+	internal sealed record MatchmakingDetachment(bool CancellationRejected, List<(Lobby Lobby, LobbyMember Member)> Members);
+
+	private static MatchmakingDetachment RemovePlayerFromAllBuckets(UserSession player)
 	{
-		var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-		bool bCancellationRejected = false;
-
-		// also remove from any bucket we are in to avoid ghost buckets
-		foreach (var kvPair in m_dictMatchmakingBuckets)
+		var lobbies = ServiceLocator.Services.GetRequiredService<LobbyManager>();
+		bool rejected = false;
+		List<(Lobby, LobbyMember)> members = new();
+		foreach (var buckets in m_dictMatchmakingBuckets.Values)
 		{
-			foreach (MatchmakingBucket mmBucket in kvPair.Value)
+			foreach (var bucket in buckets)
 			{
-				bool bRemoved = mmBucket.RemovePlayer(plr, out bool bBucketCancellationRejected);
-				bCancellationRejected |= bBucketCancellationRejected;
-
-				if (bRemoved)
-				{
-					// remove from QM lobby too
-					Lobby? lobby = lobbyManager.GetLobby(mmBucket.GetLobbyID());
-					if (lobby != null)
-					{
-						LobbyMember? lobbyMember = lobby.GetMemberFromUserID(plr.m_UserID);
-						if (lobbyMember != null)
-						{
-							s_log.LogDebug("User {UserId} leaving matchmaking lobby", plr.m_UserID);
-							await lobbyManager.RemoveMatchmakingMemberAsync(lobby, lobbyMember);
-						}
-					}
-
-					// if we're the last player, destroy the bucket
-					if (mmBucket.CurrentMemberCount() == 0)
-					{
-						DestroyBucket(mmBucket);
-					}
-				}
+				bool removed = bucket.RemovePlayer(player, out bool cancellationRejected);
+				rejected |= cancellationRejected;
+				if (!removed) continue;
+				var lobby = lobbies.GetLobby(bucket.GetLobbyID());
+				var member = lobby?.GetMemberFromUserID(player.m_UserID);
+				if (member != null && member.GetSession().TryGetTarget(out var memberSession) && ReferenceEquals(memberSession, player))
+					members.Add((lobby!, member));
+				if (bucket.CurrentMemberCount() == 0) DestroyBucket(bucket);
 			}
 		}
-
-		return bCancellationRejected;
+		return new(rejected, members);
 	}
 
-	public static async Task DeregisterPlayer(UserSession plr)
+	// Only matchmaking state is changed here. Membership effects run after releasing
+	// this lock, so lifecycle operations can acquire user gate -> matchmaking lock.
+	internal static async Task<MatchmakingDetachment> DetachSession(UserSession player)
 	{
-		var lobbyManager = ServiceLocator.Services.GetRequiredService<LobbyManager>();
-		bool bCancellationRejected;
-		await plr.MatchmakingStateLock.WaitAsync();
+		await player.MatchmakingStateLock.WaitAsync();
 		try
 		{
-			plr.IsRegisteredForMatchmaking = false;
-			RemovePendingSession(plr);
-			bCancellationRejected = await RemovePlayerFromAllBuckets(plr);
+			player.IsRegisteredForMatchmaking = false;
+			RemovePendingSession(player);
+			var detached = RemovePlayerFromAllBuckets(player);
+			if (!detached.CancellationRejected) RecordQueueExit(player, "withdrawn");
+			return detached;
 		}
 		finally
 		{
-			plr.MatchmakingStateLock.Release();
+			player.MatchmakingStateLock.Release();
 		}
+	}
 
-		// leave QM lobby too
-		if (!bCancellationRejected)
-		{
-			RecordQueueExit(plr, "withdrawn");
-			s_log.LogDebug("User {UserId} leaving any lobby during matchmaking cleanup", plr.m_UserID);
-			await lobbyManager.LeaveAllLobbiesAsync(plr.m_UserID);
-		}
+	public static async Task DeregisterPlayer(UserSession player)
+	{
+		var detached = await DetachSession(player);
+		var lobbies = ServiceLocator.Services.GetRequiredService<LobbyManager>();
+		foreach (var entry in detached.Members)
+			await lobbies.RemoveMatchmakingMemberAsync(entry.Lobby, entry.Member);
+		if (!detached.CancellationRejected) await lobbies.LeaveAllLobbiesAsync(player.m_UserID);
 	}
 }
