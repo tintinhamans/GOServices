@@ -44,6 +44,8 @@ public class FriendConfiguration : IEntityTypeConfiguration<FriendEntry>
 		builder.ToTable("friends");
 
 		builder.HasKey(f => new { f.UserId1, f.UserId2 });
+		builder.HasIndex(f => f.UserId2)
+			.HasDatabaseName("ix_friends_user_id_2");
 
 		builder.Property(f => f.UserId1)
 			.HasColumnName("user_id_1");
@@ -60,6 +62,8 @@ public class FriendRequestConfiguration : IEntityTypeConfiguration<FriendRequest
 		builder.ToTable("friends_requests");
 
 		builder.HasKey(f => new { f.SourceUserId, f.TargetUserId });
+		builder.HasIndex(f => f.TargetUserId)
+			.HasDatabaseName("ix_friends_requests_target_user_id");
 
 		builder.Property(f => f.SourceUserId)
 			.HasColumnName("source_user_id");

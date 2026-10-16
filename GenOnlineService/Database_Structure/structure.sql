@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS `daily_stats` (
 CREATE TABLE IF NOT EXISTS `friends` (
   `user_id_1` bigint(20) NOT NULL,
   `user_id_2` bigint(20) NOT NULL,
-  PRIMARY KEY (`user_id_1`,`user_id_2`) USING BTREE
+  PRIMARY KEY (`user_id_1`,`user_id_2`) USING BTREE,
+  KEY `ix_friends_user_id_2` (`user_id_2`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci;
 
 -- Data exporting was unselected.
@@ -50,7 +51,8 @@ CREATE TABLE IF NOT EXISTS `friends_blocked` (
 CREATE TABLE IF NOT EXISTS `friends_requests` (
   `source_user_id` bigint(20) NOT NULL,
   `target_user_id` bigint(20) NOT NULL,
-  PRIMARY KEY (`source_user_id`,`target_user_id`) USING BTREE
+  PRIMARY KEY (`source_user_id`,`target_user_id`) USING BTREE,
+  KEY `ix_friends_requests_target_user_id` (`target_user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci;
 
 -- Data exporting was unselected.
@@ -218,7 +220,8 @@ CREATE TABLE IF NOT EXISTS `users` (
   `banned_by` varchar(50) DEFAULT NULL,
   `ban_verified_by` varchar(50) DEFAULT NULL,
   `ban_aliases` varchar(50) DEFAULT NULL,
-  PRIMARY KEY (`user_id`)
+  PRIMARY KEY (`user_id`),
+  KEY `ix_users_banned` (`banned`)
 ) ENGINE=InnoDB AUTO_INCREMENT=34621 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- Data exporting was unselected.

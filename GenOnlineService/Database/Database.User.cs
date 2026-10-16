@@ -123,6 +123,8 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
 
 		// prim key
 		builder.HasKey(e => e.ID);
+		builder.HasIndex(e => e.IsBanned)
+			.HasDatabaseName("ix_users_banned");
 
 		builder.Property(e => e.ID).HasColumnName("user_id");
 
