@@ -874,9 +874,11 @@ static class MatchmakingManager
 			}
 		}
 
+		private long m_MeshCheckID;
+
 		private async Task TriggerFullMeshConnectivityChecks(Lobby lobby)
 		{
-			await lobby.StartFullMeshConnectivityCheck();
+			m_MeshCheckID = await lobby.StartFullMeshConnectivityCheck();
 			lock (m_StateLock)
 			{
 				// Publish the state transition before any notification work. If a send fails, the
@@ -886,8 +888,6 @@ static class MatchmakingManager
 
 			// kept at or above the legacy threshold so short tuned checks don't show a start countdown on older clients
 			QueueSetupProgress(Math.Max(FullMeshCheckSettings.MaxDurationMS + SetupClientTimeoutMarginMs, LegacyClientCountdownThresholdMs));
-
-			lobby.SendFullMeshConnectivityCheckRequestToMembers();
 
 			foreach (MatchmakingBucketMember member in m_lstMembers)
 			{
@@ -1052,7 +1052,7 @@ static class MatchmakingManager
 
 					await lobbyDuringMeshCheck.ProcessPendingFullMeshConnectivityChecks();
 
-					if (!lobbyDuringMeshCheck.PendingFullMeshConnectivityChecks)
+					if (await lobbyDuringMeshCheck.GetFullMeshCheckResult(m_MeshCheckID) is bool meshComplete)
 					{
 						bool bStartCountdown;
 						bool bAbortStart;
@@ -1068,7 +1068,7 @@ static class MatchmakingManager
 							else
 							{
 								m_bWaitingOnMeshConnectivityChecks = false;
-								bStartCountdown = IsFormationCurrent(lobbyDuringMeshCheck) && lobbyDuringMeshCheck.LastFullMeshConnectivityCheckOutcome == true;
+								bStartCountdown = IsFormationCurrent(lobbyDuringMeshCheck) && meshComplete;
 								bAbortStart = !bStartCountdown;
 								if (bStartCountdown)
 								{
@@ -1116,6 +1116,7 @@ static class MatchmakingManager
 						return;
 					}
 
+					bool meshStillValid = await lobbyAfterCountdown.GetFullMeshCheckResult(m_MeshCheckID) == true;
 					bool bStartGame;
 					bool bAbortStart;
 					lock (m_StateLock)
@@ -1129,7 +1130,7 @@ static class MatchmakingManager
 						{
 							m_bHasStartedCountdown = false;
 							m_StartTime = -1;
-							bStartGame = IsFormationCurrent(lobbyAfterCountdown);
+							bStartGame = meshStillValid && IsFormationCurrent(lobbyAfterCountdown);
 							bAbortStart = !bStartGame;
 							if (bStartGame)
 							{
