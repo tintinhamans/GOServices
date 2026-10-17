@@ -361,7 +361,7 @@ namespace GenOnlineService
 			{
 				msg_id = (int)EWebSocketMessageID.FULL_MESH_CONNECTIVITY_CHECK_RESPONSE_COMPLETE_TO_HOST,
 				mesh_check_id = FullMeshCheckID, attempt = FullMeshCheckAttempt,
-				mesh_complete = success, reason = reason, missing_connections = missing
+				mesh_complete = success, reason = reason ?? string.Empty, missing_connections = missing
 			};
 			m_MeshHost.Session.QueueWebsocketSend(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(outcome)));
 		}

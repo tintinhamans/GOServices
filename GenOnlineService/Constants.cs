@@ -2920,7 +2920,7 @@ namespace GenOnlineService
 	{
 		public long mesh_check_id { get; set; }
 		public int attempt { get; set; }
-		public string? reason { get; set; }
+		public string reason { get; set; } = string.Empty;
 		public bool mesh_complete { get; set; }
 		public List<MissingConnectionEntry> missing_connections { get; set; } = new();
 	}
