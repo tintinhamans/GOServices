@@ -118,7 +118,7 @@ public partial class LobbyManager
 		if (!IsCurrentSession(session) || session.IsRetired) return;
 		var detached = await MatchmakingManager.DetachSessionAsync(session);
 		foreach (var entry in detached.Members)
-			await entry.Lobby.RemoveMemberAsync(session.m_UserID, entry.Member);
+			await RemoveMembershipAsync(entry.Lobby, session.m_UserID, entry.Member);
 		if (!detached.CancellationRejected) await LeaveMembershipsAsync(session.m_UserID);
 	}
 }

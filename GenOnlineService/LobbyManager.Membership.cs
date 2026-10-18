@@ -96,13 +96,7 @@ public partial class LobbyManager
 		using var membership = await AcquireMembershipGateAsync(command.UserID);
 		var lobby = GetLobby(command.LobbyID);
 		if (lobby == null) return false;
-		var removed = await lobby.RemoveMemberAsync(command.UserID);
-		if (removed == null) return false;
-		var session = membershipConnections.GetSession(command.UserID, command.SessionType);
-		if (session != null && session.currentLobbyID == command.LobbyID
-			&& removed.GetSession().TryGetTarget(out var memberSession) && ReferenceEquals(session, memberSession))
-			await ClearSessionMembershipStateAsync(command.UserID, command.SessionType);
-		return true;
+		return await RemoveMembershipAsync(lobby, command.UserID) != null;
 	}
 
 	public async Task<LobbyMembershipStatus> KickAsync(KickLobbyMemberCommand command)
@@ -138,7 +132,27 @@ public partial class LobbyManager
 		using var membership = await AcquireMembershipGateAsync(member.UserID);
 		if (!member.GetSession().TryGetTarget(out var session) || !IsCurrentSession(session) || session.IsRetired) return;
 		if (sendPeerTeardown) lobby.SendPeerTeardownToDepartingMember(member);
-		await lobby.RemoveMemberAsync(member.UserID, member);
+		await RemoveMembershipAsync(lobby, member.UserID, member);
+	}
+
+	// Caller holds the user's membership gate through removal and session cleanup.
+	private async Task<LobbyMember?> RemoveMembershipAsync(Lobby lobby, long userID, LobbyMember? expectedMember = null)
+	{
+		var removed = await lobby.RemoveMemberAsync(userID, expectedMember);
+		if (removed != null && removed.GetSession().TryGetTarget(out var session)
+			&& IsCurrentSession(session) && !session.IsRetired && session.currentLobbyID == lobby.LobbyID)
+			await ClearSessionMembershipStateAsync(userID, session.GetSessionType());
+		return removed;
+	}
+
+	internal async Task<bool> TryRequeueMatchmakingAsync(UserSession session, long expectedLobbyID, byte[] requeueActionJSON)
+	{
+		using var membership = await AcquireMembershipGateAsync(session.m_UserID);
+		if (!IsCurrentSession(session) || session.IsRetired
+			|| (session.currentLobbyID != -1 && session.currentLobbyID != expectedLobbyID)) return false;
+		if (session.currentLobbyID == expectedLobbyID && expectedLobbyID != -1)
+			await ClearSessionMembershipStateAsync(session.m_UserID, session.GetSessionType());
+		return await MatchmakingManager.TryRequeueRegisteredPlayer(session, requeueActionJSON);
 	}
 
 	public async Task LeaveAllLobbiesAsync(long userID)
@@ -150,7 +164,7 @@ public partial class LobbyManager
 	private async Task LeaveMembershipsAsync(long userID)
 	{
 		foreach (Lobby lobby in m_dictLobbies.Values)
-			await lobby.RemoveMemberAsync(userID);
+			await RemoveMembershipAsync(lobby, userID);
 	}
 	internal async Task<(string Username, string Token)> CreateLobbyRelayCredentialsAsync(UserSession session, long lobbyID)
 	{
