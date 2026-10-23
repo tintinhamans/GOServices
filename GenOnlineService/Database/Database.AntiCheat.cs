@@ -19,9 +19,13 @@
 using GenOnlineService;
 using Microsoft.EntityFrameworkCore;		
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.Extensions.Primitives;
+using MySqlConnector;
+using Npgsql;
+using System.Data.Common;
+using System.Text;
 using System.Text.Json;
 
-// TODO_EFCORE: When updating this, make sure we preserve old ON DUPLICATE behavior, to overwrite the old data since day_of_year key will be re-used
 public class AcReviewCrc
 {
 	public Int64 UserId { get; set; }
@@ -38,6 +42,92 @@ public class AcReviewModule
 	public string ModuleName { get; set; } = null!;
 	public string ModulePath { get; set; } = null!;
 	public ulong ModuleSize { get; set; }
+}
+
+// One module reported by an anticheat Type2 probe response
+public readonly record struct AcModuleReport(string ModuleName, string ModulePath, int ModuleSize);
+
+// Cached AC:allowed_modules / AC:allowed_module_paths, refreshed whenever the configuration reloads
+internal static class AntiCheatModuleAllowList
+{
+	private sealed class Snapshot
+	{
+		public string[] Modules = Array.Empty<string>();
+		public string[] Paths = Array.Empty<string>();
+	}
+
+	private static readonly object s_lock = new();
+	private static volatile Snapshot? s_snapshot = null;
+	private static IDisposable? s_reloadRegistration = null;
+
+	private static Snapshot? GetSnapshot()
+	{
+		Snapshot? snapshot = s_snapshot;
+		if (snapshot != null)
+		{
+			return snapshot;
+		}
+
+		IConfiguration? config = GenOnlineService.Program.g_Config;
+		if (config == null)
+		{
+			return null;
+		}
+
+		lock (s_lock)
+		{
+			if (s_reloadRegistration == null)
+			{
+				s_reloadRegistration = ChangeToken.OnChange(() => config.GetReloadToken(), () => Reload());
+			}
+
+			return Reload();
+		}
+	}
+
+	private static Snapshot? Reload()
+	{
+		IConfiguration? config = GenOnlineService.Program.g_Config;
+		if (config == null)
+		{
+			return null;
+		}
+
+		IConfiguration acSettings = config.GetSection("AC");
+		Snapshot snapshot = new Snapshot
+		{
+			Modules = acSettings.GetSection("allowed_modules").Get<List<string>>()?.ToArray() ?? Array.Empty<string>(),
+			Paths = acSettings.GetSection("allowed_module_paths").Get<List<string>>()?.ToArray() ?? Array.Empty<string>()
+		};
+
+		s_snapshot = snapshot;
+		return snapshot;
+	}
+
+	// Filename must match an allowed module exactly, or the directory must start with an allowed path
+	public static bool IsAllowed(string moduleFilename, string modulePath)
+	{
+		Snapshot? snapshot = GetSnapshot();
+		if (snapshot == null)
+		{
+			return false;
+		}
+
+		if (Array.IndexOf(snapshot.Modules, moduleFilename) >= 0)
+		{
+			return true;
+		}
+
+		foreach (string allowedDir in snapshot.Paths)
+		{
+			if (modulePath.StartsWith(allowedDir))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
 }
 
 public class AcReviewNewAccountGame
@@ -172,6 +262,11 @@ namespace Database
 	{
 		private static readonly ILogger s_log = AppLog.For(typeof(AntiCheat));
 
+		private static DbParameter CreateParameter(bool postgres, string name, object value)
+		{
+			return postgres ? new NpgsqlParameter(name, value) : new MySqlParameter(name, value);
+		}
+
 		public static async Task AC_BanUser(AppDbContext db, long userId, string reason)
 		{
 			try
@@ -204,51 +299,101 @@ namespace Database
 		{
 			try
 			{
-				db.AcReviewsCrc.Add(new AcReviewCrc
+				// Atomic upsert: a repeat report for the same key refreshes most_recent_match instead of failing with a duplicate key error
+				if (db.Database.IsNpgsql())
 				{
-					UserId = userId,
-					OriginalCrc = originalCrc,
-					DiffCrc = diffCrc,
-					MostRecentMatch = matchId
-				});
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO ac_reviews_crc (user_id, original_crc, diff_crc, most_recent_match)
+						VALUES ({userId}, {originalCrc}, {diffCrc}, {(long)matchId})
+						ON CONFLICT (user_id, original_crc, diff_crc, most_recent_match) DO UPDATE SET most_recent_match = EXCLUDED.most_recent_match");
+				}
+				else
+				{
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO ac_reviews_crc (user_id, original_crc, diff_crc, most_recent_match)
+						VALUES ({userId}, {originalCrc}, {diffCrc}, {matchId})
+						ON DUPLICATE KEY UPDATE most_recent_match = VALUES(most_recent_match)");
+				}
 
-				await db.SaveChangesAsync();
-				AppMetrics.RecordSecurityAction("anticheat_", "success");
+				AppMetrics.RecordSecurityAction("anticheat_", "success");
 			}
 			catch (Exception ex)
 			{
-				AppMetrics.RecordSecurityAction("anticheat_", "error");
+				if (DbHelpers.IsUniqueViolation(ex))
+				{
+					return;
+				}
+
+				AppMetrics.RecordSecurityAction("anticheat_", "error");
 				s_log.LogError(ex, "FlagAccountForReview failed");
 			}
 		}
 
 
-		public static async Task FlagAccountForReview_Module(
+		// Flags all given modules for one probe response in a single idempotent statement.
+		// Returns true when the rows are persisted (or already were), false on a real database error.
+		public static async Task<bool> FlagAccountForReview_Modules(
 	AppDbContext db,
 	Int64 userId,
 	ulong matchId,
-	string moduleName,
-	string modulePath,
-	int moduleSize)
+	IReadOnlyList<AcModuleReport> modules)
 		{
+			if (modules.Count == 0)
+			{
+				return true;
+			}
+
 			try
 			{
-				db.AcReviewsModules.Add(new AcReviewModule
-				{
-					UserId = userId,
-					MatchId = matchId,
-					ModuleName = moduleName,
-					ModulePath = modulePath,
-					ModuleSize = (ulong)moduleSize
-				});
+				const int ChunkSize = 200;
 
-				await db.SaveChangesAsync();
-				AppMetrics.RecordSecurityAction("anticheat_", "success");
+				for (int offset = 0; offset < modules.Count; offset += ChunkSize)
+				{
+					int count = Math.Min(ChunkSize, modules.Count - offset);
+					bool postgres = db.Database.IsNpgsql();
+
+					// Only parameter placeholders are concatenated here, all values are bound as parameters
+					StringBuilder sql = new StringBuilder("INSERT INTO ac_reviews_modules (user_id, match_id, module_name, module_path, module_size) VALUES ");
+					List<object> parameters = new List<object>(2 + (count * 3));
+					parameters.Add(CreateParameter(postgres, "@uid", userId));
+					parameters.Add(CreateParameter(postgres, "@mid", postgres ? (long)matchId : (object)matchId));
+
+					for (int i = 0; i < count; ++i)
+					{
+						AcModuleReport module = modules[offset + i];
+
+						if (i > 0)
+						{
+							sql.Append(',');
+						}
+
+						sql.Append("(@uid, @mid, @n").Append(i).Append(", @p").Append(i).Append(", @s").Append(i).Append(')');
+						parameters.Add(CreateParameter(postgres, "@n" + i, module.ModuleName));
+						parameters.Add(CreateParameter(postgres, "@p" + i, module.ModulePath));
+						parameters.Add(CreateParameter(postgres, "@s" + i, postgres ? (long)module.ModuleSize : (object)(ulong)module.ModuleSize));
+					}
+
+					// No-op update on the unique key (user_id, match_id, module_name): repeats are ignored, other errors still surface
+					sql.Append(postgres
+						? " ON CONFLICT (user_id, match_id, module_name) DO NOTHING"
+						: " ON DUPLICATE KEY UPDATE report_id = report_id");
+
+					await db.Database.ExecuteSqlRawAsync(sql.ToString(), parameters);
+				}
+
+				AppMetrics.RecordSecurityAction("anticheat_", "success");
+				return true;
 			}
 			catch (Exception ex)
 			{
-				AppMetrics.RecordSecurityAction("anticheat_", "error");
-				s_log.LogError(ex, "FlagAccountForReview_Module failed");
+				if (DbHelpers.IsUniqueViolation(ex))
+				{
+					return true;
+				}
+
+				AppMetrics.RecordSecurityAction("anticheat_", "error");
+				s_log.LogError(ex, "FlagAccountForReview_Modules failed");
+				return false;
 			}
 		}
 
