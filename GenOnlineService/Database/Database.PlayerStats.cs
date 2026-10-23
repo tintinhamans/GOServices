@@ -21,7 +21,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using System.Text.Json;
 
-// TODO_EFCORE: When updating this, make sure we preserve old ON DUPLICATE behavior, to overwrite the old data since day_of_year key will be re-used
 public class UserStatsEntry
 {
 	public long UserId { get; set; }
@@ -63,15 +62,6 @@ namespace Database
 			  .FirstOrDefault()
 	);
 
-
-		private static readonly Func<AppDbContext, long, Task<string?>> _getUserStats =
-	EF.CompileAsyncQuery(
-		(AppDbContext db, long userId) =>
-			db.UserStats
-			  .Where(s => s.UserId == userId)
-			  .Select(s => s.Stats)
-			  .FirstOrDefault()
-	);
 
 		public static async Task<PlayerStats> GetPlayerStats(
 	AppDbContext db,
@@ -132,50 +122,27 @@ namespace Database
 		{
 			try
 			{
-				// 1. Load existing JSON (if any)
-				string? json = await _getUserStats(db, userId);
+				// Atomic upsert: insert a new {"statId":value} document, or set that single key inside the existing JSON.
+				// Avoids the read-modify-write race (duplicate insert for a new user, lost updates for concurrent stats).
+				string statKey = statId.ToString();
+				string statPath = "$.\"" + statKey + "\"";
+				string initialJson = JsonSerializer.Serialize(new Dictionary<string, int> { [statKey] = statVal });
 
-				Dictionary<string, int> stats;
-
-				if (string.IsNullOrEmpty(json))
+				if (db.Database.IsNpgsql())
 				{
-					// No row exists → create new dictionary
-					stats = new Dictionary<string, int>();
+					// stats is jsonb: the document is cast explicitly, and jsonb_set takes the key as a path element instead of a JSON path
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO user_stats_v2 (user_id, stats)
+						VALUES ({userId}, {initialJson}::jsonb)
+						ON CONFLICT (user_id) DO UPDATE SET stats = jsonb_set(user_stats_v2.stats, ARRAY[{statKey}]::text[], to_jsonb({statVal}::int))");
 				}
 				else
 				{
-					// Deserialize existing stats
-					stats = JsonSerializer.Deserialize<Dictionary<string, int>>(json)
-							?? new Dictionary<string, int>();
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO user_stats_v2 (user_id, stats)
+						VALUES ({userId}, {initialJson})
+						ON DUPLICATE KEY UPDATE stats = JSON_SET(stats, {statPath}, {statVal})");
 				}
-
-				// 2. Update the stat
-				stats[statId.ToString()] = statVal;
-
-				// 3. Serialize back
-				string updatedJson = JsonSerializer.Serialize(stats);
-
-				// 4. Check if row exists
-				bool exists = json != null;
-
-				if (!exists)
-				{
-					// INSERT
-					db.UserStats.Add(new UserStatsEntry
-					{
-						UserId = userId,
-						Stats = updatedJson
-					});
-
-					await db.SaveChangesAsync();
-					return;
-				}
-
-				// 5. UPDATE using ExecuteUpdateAsync (fast, no tracking)
-				await db.UserStats
-					.Where(s => s.UserId == userId)
-					.ExecuteUpdateAsync(s => s
-						.SetProperty(x => x.Stats, updatedJson));
 			}
 			catch (Exception ex)
 			{

@@ -222,48 +222,43 @@ namespace Database
 				int monthOfYear = DateTime.UtcNow.Month;
 				int year = DateTime.UtcNow.Year;
 
-				var daily = new LeaderboardDaily
-				{
-					UserId = playerId,
-					Points = EloConfig.BaseRating,
-					DayOfYear = dayOfYear,
-					Year = year,
-					Wins = 0,
-					Losses = 0
-				};
+				int basePoints = EloConfig.BaseRating;
 
-				var monthly = new LeaderboardMonthly
+				// One atomic "INSERT IGNORE"-style upsert per table (no-op on duplicate). Independent statements so an
+				// existing row in one table (e.g. yearly) can't roll back the creation of the others (e.g. a new daily row).
+				if (db.Database.IsNpgsql())
 				{
-					UserId = playerId,
-					Points = EloConfig.BaseRating,
-					MonthOfYear = monthOfYear,
-					Year = year,
-					Wins = 0,
-					Losses = 0
-				};
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_daily (user_id, points, day_of_year, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {dayOfYear}, {year}, 0, 0)
+						ON CONFLICT (user_id, day_of_year, year) DO NOTHING");
 
-				var yearly = new LeaderboardYearly
-				{
-					UserId = playerId,
-					Points = EloConfig.BaseRating,
-					Year = year,
-					Wins = 0,
-					Losses = 0
-				};
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_monthly (user_id, points, month_of_year, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {monthOfYear}, {year}, 0, 0)
+						ON CONFLICT (user_id, month_of_year, year) DO NOTHING");
 
-				db.Add(daily);
-				db.Add(monthly);
-				db.Add(yearly);
-
-				try
-				{
-					await db.SaveChangesAsync();
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_yearly (user_id, points, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {year}, 0, 0)
+						ON CONFLICT (user_id, year) DO NOTHING");
 				}
-				catch (DbUpdateException ex)
+				else
 				{
-					// Ignore duplicate key errors (INSERT IGNORE behavior)
-					if (!DbHelpers.IsUniqueViolation(ex))
-						throw;
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_daily (user_id, points, day_of_year, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {dayOfYear}, {year}, 0, 0)
+						ON DUPLICATE KEY UPDATE user_id = user_id");
+
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_monthly (user_id, points, month_of_year, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {monthOfYear}, {year}, 0, 0)
+						ON DUPLICATE KEY UPDATE user_id = user_id");
+
+					await db.Database.ExecuteSqlInterpolatedAsync($@"
+						INSERT INTO leaderboard_yearly (user_id, points, year, wins, losses)
+						VALUES ({playerId}, {basePoints}, {year}, 0, 0)
+						ON DUPLICATE KEY UPDATE user_id = user_id");
 				}
 			}
 			catch (Exception ex)
