@@ -299,20 +299,21 @@ namespace Database
 		{
 			try
 			{
-				// Atomic upsert: a repeat report for the same key refreshes most_recent_match instead of failing with a duplicate key error
+				// Idempotent insert: every column is part of the primary key, so a duplicate is an identical report
+				// (same match) and is ignored; a new match still records a new row, as before
 				if (db.Database.IsNpgsql())
 				{
 					await db.Database.ExecuteSqlInterpolatedAsync($@"
 						INSERT INTO ac_reviews_crc (user_id, original_crc, diff_crc, most_recent_match)
 						VALUES ({userId}, {originalCrc}, {diffCrc}, {(long)matchId})
-						ON CONFLICT (user_id, original_crc, diff_crc, most_recent_match) DO UPDATE SET most_recent_match = EXCLUDED.most_recent_match");
+						ON CONFLICT (user_id, original_crc, diff_crc, most_recent_match) DO NOTHING");
 				}
 				else
 				{
 					await db.Database.ExecuteSqlInterpolatedAsync($@"
 						INSERT INTO ac_reviews_crc (user_id, original_crc, diff_crc, most_recent_match)
 						VALUES ({userId}, {originalCrc}, {diffCrc}, {matchId})
-						ON DUPLICATE KEY UPDATE most_recent_match = VALUES(most_recent_match)");
+						ON DUPLICATE KEY UPDATE user_id = user_id");
 				}
 
 				AppMetrics.RecordSecurityAction("anticheat_", "success");
