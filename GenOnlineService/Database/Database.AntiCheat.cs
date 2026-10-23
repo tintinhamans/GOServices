@@ -317,11 +317,12 @@ namespace Database
 		{
 			try
 			{
-				// Atomic upsert: a repeat report for the same key refreshes most_recent_match instead of failing with a duplicate key error
+				// Idempotent insert: every column is part of the primary key, so a duplicate is an identical report
+				// (same match) and is ignored; a new match still records a new row, as before
 				await db.Database.ExecuteSqlInterpolatedAsync($@"
 					INSERT INTO ac_reviews_crc (user_id, original_crc, diff_crc, most_recent_match)
 					VALUES ({userId}, {originalCrc}, {diffCrc}, {matchId})
-					ON DUPLICATE KEY UPDATE most_recent_match = VALUES(most_recent_match)");
+					ON DUPLICATE KEY UPDATE user_id = user_id");
 			}
 			catch (Exception ex)
 			{
