@@ -65,22 +65,20 @@ public class AcReviewCrcConfiguration : IEntityTypeConfiguration<AcReviewCrc>
 		entity.HasKey(e => new { e.UserId, e.OriginalCrc, e.DiffCrc, e.MostRecentMatch });
 
 		entity.Property(e => e.UserId)
-			.HasColumnName("user_id")
-			.HasColumnType("bigint(20)");
+			.HasColumnName("user_id");
 
 		entity.Property(e => e.OriginalCrc)
 			.HasColumnName("original_crc")
-			.HasColumnType("varchar(64)")
+			.HasMaxLength(64)
 			.IsRequired();
 
 		entity.Property(e => e.DiffCrc)
 			.HasColumnName("diff_crc")
-			.HasColumnType("varchar(64)")
+			.HasMaxLength(64)
 			.IsRequired();
 
 		entity.Property(e => e.MostRecentMatch)
-			.HasColumnName("most_recent_match")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("most_recent_match");
 	}
 }
 
@@ -94,30 +92,26 @@ public class AcReviewModuleConfiguration : IEntityTypeConfiguration<AcReviewModu
 
 		entity.Property(e => e.ReportId)
 			.HasColumnName("report_id")
-			.HasColumnType("bigint(20) unsigned")
 			.ValueGeneratedOnAdd();
 
 		entity.Property(e => e.UserId)
-			.HasColumnName("user_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("user_id");
 
 		entity.Property(e => e.MatchId)
-			.HasColumnName("match_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("match_id");
 
 		entity.Property(e => e.ModuleName)
 			.HasColumnName("module_name")
-			.HasColumnType("varchar(128)")
+			.HasMaxLength(128)
 			.IsRequired();
 
 		entity.Property(e => e.ModulePath)
 			.HasColumnName("module_path")
-			.HasColumnType("varchar(512)")
+			.HasMaxLength(512)
 			.IsRequired();
 
 		entity.Property(e => e.ModuleSize)
-			.HasColumnName("module_size")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("module_size");
 
 		entity.HasIndex(e => new { e.UserId, e.MatchId, e.ModuleName })
 			.IsUnique()
@@ -135,16 +129,13 @@ public class AcReviewNewAccountGameConfiguration : IEntityTypeConfiguration<AcRe
 
 		entity.Property(e => e.ReportId)
 			.HasColumnName("report_id")
-			.HasColumnType("bigint(20) unsigned")
 			.ValueGeneratedOnAdd();
 
 		entity.Property(e => e.UserId)
-			.HasColumnName("user_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("user_id");
 
 		entity.Property(e => e.MatchId)
-			.HasColumnName("match_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("match_id");
 	}
 }
 
@@ -158,20 +149,17 @@ public class AcReviewProbeConfiguration : IEntityTypeConfiguration<AcReviewProbe
 
 		entity.Property(e => e.ReportId)
 			.HasColumnName("report_id")
-			.HasColumnType("bigint(20) unsigned")
 			.ValueGeneratedOnAdd();
 
 		entity.Property(e => e.UserId)
-			.HasColumnName("user_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("user_id");
 
 		entity.Property(e => e.MatchId)
-			.HasColumnName("match_id")
-			.HasColumnType("bigint(20) unsigned");
+			.HasColumnName("match_id");
 
 		entity.Property(e => e.Reason)
 			.HasColumnName("reason")
-			.HasColumnType("varchar(256)")
+			.HasMaxLength(256)
 			.IsRequired();
 	}
 }

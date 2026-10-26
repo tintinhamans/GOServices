@@ -262,7 +262,7 @@ namespace Database
 				catch (DbUpdateException ex)
 				{
 					// Ignore duplicate key errors (INSERT IGNORE behavior)
-					if (!IsDuplicateKeyException(ex))
+					if (!DbHelpers.IsUniqueViolation(ex))
 						throw;
 				}
 			}
@@ -271,12 +271,6 @@ namespace Database
 				s_log.LogError(ex, "CreateUserEntriesIfNotExists failed");
 			}
 		}
-
-		private static bool IsDuplicateKeyException(DbUpdateException ex)
-		{
-			return ex.InnerException?.Message.Contains("Duplicate entry") == true;
-		}
-
 
 		private static async Task<List<LeaderboardRow>> MaterializeAsync(IAsyncEnumerable<LeaderboardRow> source)
 		{

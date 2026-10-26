@@ -85,14 +85,10 @@ public class MatchHistoryConfiguration : IEntityTypeConfiguration<MatchHistoryEn
 			.HasColumnName("finished");
 
 		entity.Property(e => e.Started)
-			.HasColumnName("started")
-			.HasColumnType("datetime")
-			.HasDefaultValueSql("current_timestamp()");
+			.HasColumnName("started");
 
 		entity.Property(e => e.TimeFinished)
-			.HasColumnName("time_finished")
-			.HasColumnType("datetime")
-			.HasDefaultValueSql("current_timestamp()");
+			.HasColumnName("time_finished");
 
 		entity.Property(e => e.MapName)
 			.HasColumnName("map_name")
@@ -109,15 +105,13 @@ public class MatchHistoryConfiguration : IEntityTypeConfiguration<MatchHistoryEn
 
 		entity.Property(e => e.LobbyType)
 			.HasColumnName("lobby_type")
-			.HasConversion<byte?>()
-			.HasColumnType("tinyint unsigned");
+			.HasConversion<byte?>();
 
 		entity.Property(e => e.VanillaTeams)
 			.HasColumnName("vanilla_teams");
 
 		entity.Property(e => e.StartingCash)
-			.HasColumnName("starting_cash")
-			.HasColumnType("int unsigned");
+			.HasColumnName("starting_cash");
 
 		entity.Property(e => e.LimitSuperweapons)
 			.HasColumnName("limit_superweapons");
@@ -129,29 +123,27 @@ public class MatchHistoryConfiguration : IEntityTypeConfiguration<MatchHistoryEn
 			.HasColumnName("allow_observers");
 
 		entity.Property(e => e.MaxCamHeight)
-			.HasColumnName("max_cam_height")
-			.HasColumnType("smallint unsigned");
+			.HasColumnName("max_cam_height");
 
 		entity.Property(e => e.ExeCRC)
-			.HasColumnName("exe_crc")
-			.HasColumnType("int unsigned");
+			.HasColumnName("exe_crc");
 
 		entity.Property(e => e.IniCRC)
-			.HasColumnName("ini_crc")
-			.HasColumnType("int unsigned");
+			.HasColumnName("ini_crc");
 
 		entity.Property(e => e.MapPath)
 			.HasColumnName("map_path")
-			.HasMaxLength(128);
+			.HasMaxLength(256);
+
+		// Serves the match feed: finished matches since a point in time, ordered by finish time
+		entity.HasIndex(e => new { e.Finished, e.TimeFinished, e.MatchId })
+			.HasDatabaseName("idx_finished_time");
 
 		// JSON columns
 		for (int i = 0; i < 8; i++)
 		{
 			entity.Property<string?>($"MemberSlot{i}")
-				.HasColumnName($"member_slot_{i}")
-				.HasColumnType("longtext")
-				.HasCharSet("utf8mb4")
-				.HasCollation("utf8mb4_bin");
+				.HasColumnName($"member_slot_{i}");
 		}
 	}
 }
@@ -172,8 +164,8 @@ public class ExternalPublicationConfiguration : IEntityTypeConfiguration<Externa
 		entity.ToTable("external_publication");
 		entity.HasKey(e => e.MatchId);
 		entity.Property(e => e.MatchId).HasColumnName("match_id").ValueGeneratedNever();
-		entity.Property(e => e.NextAttemptAt).HasColumnName("next_attempt_at").HasColumnType("datetime");
-		entity.Property(e => e.PublishedAt).HasColumnName("published_at").HasColumnType("datetime");
+		entity.Property(e => e.NextAttemptAt).HasColumnName("next_attempt_at");
+		entity.Property(e => e.PublishedAt).HasColumnName("published_at");
 		entity.Property(e => e.Attempts).HasColumnName("attempts").HasDefaultValue(0);
 		entity.Property(e => e.LastError).HasColumnName("last_error").HasMaxLength(512);
 		entity.HasIndex(e => new { e.PublishedAt, e.NextAttemptAt })
@@ -295,7 +287,7 @@ namespace Database
 	);
 
 
-		private static Expression<Func<SetPropertyCalls<MatchHistoryEntry>, SetPropertyCalls<MatchHistoryEntry>>>
+		private static Action<UpdateSettersBuilder<MatchHistoryEntry>>
 	BuildSetter(int slotIndex, string? json)
 		{
 			return slotIndex switch
@@ -313,7 +305,7 @@ namespace Database
 		}
 
 
-		private static readonly Action<SetPropertyCalls<MatchHistoryEntry>, string?>[] _slotSetters =
+		private static readonly Action<UpdateSettersBuilder<MatchHistoryEntry>, string?>[] _slotSetters =
 {
 	(s, v) => s.SetProperty(m => m.MemberSlot0, v),
 	(s, v) => s.SetProperty(m => m.MemberSlot1, v),
@@ -521,8 +513,11 @@ namespace Database
 				string rosterType = ComputeRosterType(playersPerTeam);
 
 				// Build EF entity
+				DateTime now = DateTime.UtcNow;
 				var entity = new MatchHistoryEntry
 				{
+					Started = now,
+					TimeFinished = now,
 					Owner = lobby.Owner,
 					Name = lobby.Name,
 					MapName = lobby.MapName,
@@ -1224,7 +1219,7 @@ namespace Database
 		}
 
 		// METADATA
-		private static Expression<Func<SetPropertyCalls<MatchHistoryEntry>, SetPropertyCalls<MatchHistoryEntry>>>
+		private static Action<UpdateSettersBuilder<MatchHistoryEntry>>
 	BuildSlotSetter(int slotIndex, string updatedJson)
 		{
 			return slotIndex switch

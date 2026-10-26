@@ -39,7 +39,8 @@ public class ConnectionOutcomeConfiguration : IEntityTypeConfiguration<Connectio
 		builder.HasKey(x => x.DayOfYear);
 
 		builder.Property(x => x.DayOfYear)
-			.HasColumnName("day_of_year");
+			.HasColumnName("day_of_year")
+			.ValueGeneratedNever();
 
 		builder.Property(x => x.Ipv4Count)
 			.HasColumnName("ipv4_count");
