@@ -21,12 +21,14 @@ namespace GenOnlineService
             "db.statement",
             "db.query.text",
             "db.connection_string",
-            "db.user"
+            "db.user",
+            // derived from the connection string
+            "db.npgsql.data_source"
         ];
 
         public override void OnEnd(Activity activity)
         {
-            if (activity.Source.Name == AppMetrics.MySqlActivitySourceName)
+            if (activity.Source.Name is AppMetrics.MySqlActivitySourceName or AppMetrics.NpgsqlActivitySourceName)
             {
                 foreach (string tag in s_databaseTags)
                 {
