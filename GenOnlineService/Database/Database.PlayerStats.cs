@@ -38,19 +38,12 @@ public class UserStatsConfiguration : IEntityTypeConfiguration<UserStatsEntry>
 		builder.HasKey(x => x.UserId);
 
 		builder.Property(x => x.UserId)
-			.HasColumnName("user_id");
+			.HasColumnName("user_id")
+			.ValueGeneratedNever();
 
 		builder.Property(x => x.Stats)
 			.HasColumnName("stats")
-			.HasColumnType("longtext")
-			.UseCollation("utf8mb4_bin")     // matches your CREATE TABLE
 			.IsRequired();
-
-		// JSON validity constraint
-		builder.HasCheckConstraint(
-			"CK_user_stats_v2_stats_json_valid",
-			"json_valid(`stats`)"
-		);
 	}
 }
 
