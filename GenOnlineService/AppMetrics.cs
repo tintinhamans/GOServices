@@ -20,6 +20,8 @@ namespace GenOnlineService
         public const string ActivitySourceName = MeterName;
         public const string MySqlActivitySourceName = "MySqlConnector";
         public const string MySqlMeterName = "MySqlConnector";
+        public const string NpgsqlActivitySourceName = "Npgsql";
+        public const string NpgsqlMeterName = "Npgsql";
 
         private static readonly Meter s_meter = new(MeterName);
         private static readonly ActivitySource s_activitySource = new(ActivitySourceName);

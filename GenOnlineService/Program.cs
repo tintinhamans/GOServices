@@ -1469,6 +1469,7 @@ namespace GenOnlineService
 					{
 						metrics.AddMeter(AppMetrics.MeterName);
 						metrics.AddMeter(AppMetrics.MySqlMeterName);
+						metrics.AddMeter(AppMetrics.NpgsqlMeterName);
 						metrics.AddAspNetCoreInstrumentation();
 						metrics.AddHttpClientInstrumentation();
 						metrics.AddRuntimeInstrumentation();
@@ -1481,6 +1482,7 @@ namespace GenOnlineService
 						tracing.AddHttpClientInstrumentation(options => options.RecordException = true);
 						tracing.AddSource(AppMetrics.ActivitySourceName);
 						tracing.AddSource(AppMetrics.MySqlActivitySourceName);
+						tracing.AddSource(AppMetrics.NpgsqlActivitySourceName);
 						// before Sentry and the exporter, so neither sees unredacted spans
 						tracing.AddProcessor(new TelemetryRedactionProcessor());
 						if (enableSentryOpenTelemetry)

@@ -53,7 +53,7 @@ Sentry's own EF Core/SqlClient listener is disabled so SQL never ends up in Sent
 
 - Logs from `ILogger`, with trace IDs when available.
 - HTTP requests and outgoing HTTP calls.
-- MySQL commands and connection-pool health.
+- Database commands and connection-pool health, for both MySQL/MariaDB (MySqlConnector) and PostgreSQL (Npgsql).
 - WebSocket message spans, connections, and failures.
 - Authentication, matchmaking, external publication, background jobs, and security actions.
 - .NET runtime health.
@@ -62,7 +62,7 @@ Fast tick loops are not traced on every pass. That would create too much data.
 
 ## Metrics
 
-Database, HTTP, and runtime metrics come from the built-in MySqlConnector, ASP.NET Core, HttpClient, and runtime meters. Application metrics start with `genonline.`:
+Database, HTTP, and runtime metrics come from the built-in MySqlConnector, Npgsql, ASP.NET Core, HttpClient, and runtime meters. Application metrics start with `genonline.`:
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -87,11 +87,11 @@ Metric labels use small fixed sets. They do not contain player, lobby, or match 
 
 ## Database data
 
-Spans never carry SQL text, connection strings, or database users: a span processor removes them before Sentry or the exporter sees the span.
+Spans never carry SQL text, connection strings, database users, or the Npgsql data source name (which is derived from the connection string): a span processor removes them before Sentry or the exporter sees the span.
 
 Slow-command logs contain only the operation, duration, and result. They never contain SQL or parameters.
 
-EF Core's command events (executing, executed, error, canceled) are ignored in the context options, so EF never logs SQL text whatever the logging configuration says. The `MySqlConnector` log category defaults to Warning.
+EF Core's command events (executing, executed, error, canceled) are ignored in the context options, so EF never logs SQL text whatever the logging configuration says. The `MySqlConnector` and `Npgsql` log categories default to Warning.
 
 ## Outbound URLs
 
