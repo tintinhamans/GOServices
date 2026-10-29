@@ -43,6 +43,7 @@ GeneralsOnline Game Services Code provides RESTful web services which act as a r
 - Choose the database in the `Database` section of appsettings.json:
   - `db_provider` is `"mysql"` (MySQL/MariaDB, the default when the key is missing) or `"postgres"` (PostgreSQL). Any other value stops the service at startup
   - Create an empty database and a user with full access to it, then fill in `db_host`, `db_port` (3306 for MySQL/MariaDB, 5432 for PostgreSQL), `db_name`, `db_username` and `db_password`
+  - PostgreSQL only: `db_host` may list several servers (`"10.66.0.1,10.66.0.2"`); set `db_target_session_attributes` to `"primary"` so the service always connects to the writable one, also after a failover
   - New installs should use PostgreSQL
 - Create the database schema by running `GenOnlineService migrate` (there is no SQL to import)
 - Run GenOnlineService.exe. The service never changes the schema itself and refuses to start while migrations are pending

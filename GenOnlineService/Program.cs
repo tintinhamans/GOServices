@@ -732,6 +732,13 @@ namespace GenOnlineService
 					NoResetOnClose = !db_conn_reset
 				};
 
+				// db_host may list several servers ("a,b,c"); "primary" makes Npgsql pick the writable one after a failover
+				string? targetSessionAttributes = dbSettings.GetValue<string>("db_target_session_attributes");
+				if (!string.IsNullOrWhiteSpace(targetSessionAttributes))
+				{
+					csb.TargetSessionAttributes = targetSessionAttributes;
+				}
+
 				return csb.ConnectionString;
 			}
 			else
